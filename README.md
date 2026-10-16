@@ -1,7 +1,8 @@
 # Plans de prévention — CDES
 
 Page publique de l'outil de rédaction des plans de prévention, PPSPS et protocoles
-de sécurité (GitHub Pages). Version V18 du 05/10/2026 (V17 sécurisée).
+de sécurité (GitHub Pages). Version V19 du 16/10/2026 : reprise d'un plan de prévention
+existant (Word ou PDF), tâches et opérations sur mesure, habilitations, protocole mariniers.
 
 | Fichier | Rôle |
 |---|---|
@@ -15,7 +16,7 @@ de sécurité (GitHub Pages). Version V18 du 05/10/2026 (V17 sécurisée).
 | `js/donnees.js` | données de référence publiques : bibliothèque de risques, EPI, organismes |
 | `js/images.js` | logo |
 | `js/app.js` | l'application |
-| `*_trame.docx` | les trames Word, à garder à côté de `index.html` |
+| `*_trame.docx` | les trames Word, à garder à côté de `index.html` : `PDP_trame.docx`, `PPSPS_trame.docx`, `Protocole_transport_trame.docx`, `Protocole_marinier_trame.docx`, `Affichage_trame.docx` |
 
 **Ce dépôt ne contient ni adresse de serveur, ni mot de passe, ni nom ou téléphone
 de personne.** L'appareil est « branché » en ouvrant l'outil depuis la tuile de

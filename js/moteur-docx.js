@@ -255,7 +255,7 @@ function porteUneImage(el) {
    Dans la trame, les cases à cocher ☒ / ☐ sont des glyphes MS Gothic, souvent
    enfermés dans un contrôle de contenu <w:sdt>. L'ancienne écriture réutilisait
    ce run-là : tout le texte saisi ressortait en MS Gothic, plus gros et plus
-   large que le reste du document. C'est ce que Justin a vu comme « les polices
+   large que le reste du document. C'est ce qui apparaissait comme « les polices
    d'écriture sont nulles ». On distingue donc désormais le run pictogramme
    (qui garde son glyphe) du run de texte (qui reçoit la saisie).            */
 const POLICES_PICTO = ['ms gothic', 'ms mincho', 'ms pgothic', 'wingdings', 'wingdings 2',
@@ -367,6 +367,15 @@ function ecrireDansParagraphe(p, texte) {
   if (!runs.length) return false;
 
   const lignes = String(texte).split('\n');
+
+  // 0. un texte sur plusieurs lignes dans un paragraphe JUSTIFIÉ sort avec des
+  //    blancs énormes entre les mots (Word étire chaque ligne coupée par un
+  //    saut) : on repasse ce paragraphe à gauche, rien d'autre ne change
+  if (lignes.length > 1) {
+    const jc = Array.from(p.getElementsByTagNameNS(W, 'jc')).find(j => j.parentNode && j.parentNode.parentNode === p);
+    if (jc && /^(both|distribute)$/.test(jc.getAttributeNS(W, 'val') || jc.getAttribute('w:val') || ''))
+      jc.setAttributeNS(W, 'w:val', 'left');
+  }
 
   // 1. la case à cocher de tête revient à la case, pas au texte
   const picto = runs.find(estRunPicto) || null;

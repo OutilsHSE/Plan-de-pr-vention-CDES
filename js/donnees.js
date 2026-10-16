@@ -21,8 +21,17 @@ const TYPES=[
   articles:'R.4515-1 à R.4515-11',
   entete:'Protocole de Sécurité',
   titreDoc:'Protocole de Sécurité — Chargement / Déchargement',
+  sousTitre:'Etabli en application des articles R.4515-1 à 11 du Code du Travail'},
+ {code:'marinier',court:'PS',court2:'Protocole de securite marinier',nom:'Protocole de sécurité — mariniers (transport fluvial)',
+  quand:"Un marinier ou une entreprise de transport fluvial charge ou décharge sur un chantier CDES (sédiments, fret). Même régime que le protocole transport, avec la trame dédiée aux bateaux et ses règles d'embarquement.",
+  articles:'R.4515-1 à R.4515-11',
+  entete:'Protocole de Sécurité',
+  titreDoc:'Protocole de Sécurité — Transport fluvial',
   sousTitre:'Etabli en application des articles R.4515-1 à 11 du Code du Travail'}
 ];
+/* Le protocole mariniers est un protocole de sécurité : même parcours, même
+   moteur, trame et valeurs par défaut différentes. */
+function estTypeProtocole(t){return t==='protocole'||t==='marinier'}
 
 /* --- agences CDES : adresse et téléphone suivent le choix ------------------ */
 /* --- agences et annuaire CDES : V2, plus rien d'écrit ici ------------------
@@ -65,7 +74,7 @@ const DEPARTEMENTS=[
 ];
 
 /* --- travaux dangereux, arrêté du 19 mars 1993 ----------------------------- */
-/* Liste revue par Justin (27/08/2026) : seuls trois travaux de l'arrêté
+/* Liste revue par le service HSE (27/08/2026) : seuls trois travaux de l'arrêté
    concernent réellement les chantiers CDES. La noyade est cochée d'office,
    la chute de plus de 3 m et le bruit se cochent selon le chantier. Tout le
    reste (CMR, agents biologiques — la leptospirose n'en relève pas —, grues,
@@ -196,6 +205,18 @@ const CONSIGNES_PARTICULIERES=[
  "Le stationnement des matériels flottants hors des heures de travail est sécurisé, amarrage vérifié",
  "Une réunion sécurité hebdomadaire est organisée sur le chantier avec le conducteur de travaux, le responsable de chantier et les ouvriers"
 ];
+/* Habilitations courantes des chantiers CDES (§ 4.1) — libellés génériques,
+   à ajuster sur chaque document. Le nombre reste à saisir. */
+const HABILITATIONS_TYPES=[
+ {activite:'Conduite d’engins de chantier (pelle, chargeuse, tracteur)',habilitations:'CACES R482 de la catégorie concernée + autorisation de conduite'},
+ {activite:'Conduite de chariot élévateur / télescopique',habilitations:'CACES R489 ou R486 + autorisation de conduite'},
+ {activite:'Conduite de grue auxiliaire / opérations de levage',habilitations:'CACES R490 + autorisation de conduite ; élingage'},
+ {activite:'Conduite de bateau (pousseur, barge, bateau de servitude)',habilitations:'Permis fluvial / certificat de capacité adapté au bateau'},
+ {activite:'Travaux à proximité de réseaux',habilitations:'AIPR (opérateur / encadrant) selon le rôle'},
+ {activite:'Interventions à proximité d’installations électriques',habilitations:'Habilitation électrique adaptée (H0B0 au minimum)'},
+ {activite:'Travaux en hauteur',habilitations:'Formation travail en hauteur et port du harnais'},
+ {activite:'Secours',habilitations:'SST à jour sur le chantier'}
+];
 const VISITE_MEDICALE_DEFAUT=
 "L'ensemble des collaborateurs intervenant sur le chantier dispose d'une visite d'information et de prévention à jour. "+
 "Les salariés affectés à des postes soumis à un suivi individuel renforcé (conduite d'engins, travaux à proximité de l'eau) "+
@@ -208,11 +229,15 @@ const VISITE_MEDICALE_DEFAUT=
    chantier : on raisonne en moyens de transport et en opérations.
    ========================================================================= */
 const PROT_LIEUX=['Dépôt CDES Luzancy','Chantiers CDES'];
+const PROT_LIEUX_MARINIER=['Chantiers CDES'];   // la trame mariniers n'a pas la ligne « dépôt »
 const PROT_TRANSPORTEUR=['Entreprise de transport','Transporteur sous-traitant'];
 const PROT_MODES=['Routier (terrestre)','Fluvial / Maritime'];
 const PROT_OPERATIONS=['Chargement','Déchargement','Chargement et déchargement'];
 const PROT_NATURES=['Livraison de fournitures industrielles','Livraison de matériaux',
  'Enlèvement de déchets','Transfert d’engins ou de matériels','Livraison de carburant ou de produits chimiques','Autre'];
+/* Natures de la trame mariniers, mot pour mot. */
+const PROT_NATURES_MARINIER=['Transport des matériaux de dragage (sédiments)','Livraison de fournitures industrielles',
+ 'Transport d’équipements de production','Transport de déchets et/ou de produits chimiques','Autres (à préciser)'];
 const PROT_FREQUENCES=['Opération ponctuelle',
  'Opérations répétitives (localisation unique, matériaux et équipements identiques)',
  'Opérations régulières sur l’année'];
@@ -226,7 +251,7 @@ const PROT_HABILITATIONS=[
  {activite:'Conduite d’un engin de manutention (engins TP, engins logistique, grue auxiliaire)',habilitations:'Formation CACES correspondant à la catégorie de l’engin + autorisation de conduite'},
  {activite:'Transport de produits chimiques dangereux, déchets dangereux',habilitations:'Agrément transporteur ADR'}
 ];
-/* Les libellés ci-dessous sont ceux de la trame de Justin, mot pour mot :
+/* Les libellés ci-dessous sont ceux de la trame CDES, mot pour mot :
    c'est ce qui permet de cocher les cases existantes au lieu d'en rajouter. */
 const PROT_RISQUES=[
  {operation:'Accès et circulation dans l’enceinte de l’entreprise et sur les chantiers',
@@ -263,6 +288,86 @@ const PROT_RISQUES=[
    {t:'Vérifier l’état des supports de stockage utilisés (palettes…)',on:true},
    {t:'Port des gants et des chaussures de sécurité',on:false}]}
 ];
+/* --- protocole MARINIERS : les sept opérations de la trame « Protocole Sécurité
+   Transport 2026 — mariniers », libellés et cases mot pour mot. « ancre » est le
+   bout de texte qui retrouve le tableau dans le Word. Les états cochés sont
+   ceux de la trame : chargement / déchargement, fournitures et boues de dragage
+   actifs, le reste à activer selon l'opération. ------------------------------- */
+const PROT_RISQUES_MARINIER=[
+ {operation:'Accès et circulation dans l’enceinte de l’entreprise et sur les chantiers',ancre:'Accès et circulation dans l’enceinte',actif:false,
+  risques:[{t:'Heurt / écrasement de piétons',on:true},{t:'Collision engins / véhicules',on:true},{t:'Chute à proximité des plans d’eau',on:true}],
+  mesures:[{t:'Port des vêtements haute visibilité obligatoire (coactivité)',on:true},
+   {t:'Ne pas stationner dans des zones à risque, ne pas empiéter les voies de circulation. Ne pas s’arrêter sur les voies piétonnes (dépôt)',on:false},
+   {t:'Respecter le plan de circulation au dépôt',on:false},
+   {t:'Interdiction d’approcher à moins de 2m des berges ou d’un plan d’eau sauf autorisation',on:true},
+   {t:'Baliser la zone d’intervention si coactivité.',on:true}]},
+ {operation:'Déchargement : manœuvre d’engins et opérations de levage',ancre:'manœuvre d’engins et opérations de levage',actif:true,
+  risques:[{t:'Collision / heurt / écrasement',on:true},{t:'Présence de piétons en zone dangereuse',on:true},{t:'Chute de charge',on:true},{t:'Mauvais élingage',on:true}],
+  mesures:[{t:'Interdiction de stationner sous charge. Ne pas entrer dans une zone de manœuvre. Respecter une distance de sécurité > 3m avec les engins.',on:true},
+   {t:'Adéquation de l’engin de manutention pour le déchargement (chariot, pelle mécanique, grue)',on:true},
+   {t:'Habilitations et formations pour les conducteurs d’engins',on:true},
+   {t:'Chargement / déchargement réalisé par du personnel CDES',on:true},
+   {t:'Utilisation de matériel de levage conforme (VGP). Contrôle visuel systématique.',on:true},
+   {t:'Port du casque obligatoire à proximité des zones de manœuvre (cour extérieure) et vêtements haute visibilité.',on:true},
+   {t:'Balisage et interdiction d’accès aux zones dangereuses (coactivité)',on:true}]},
+ {operation:'Transport de fournitures / petits matériels',ancre:'Transport de fournitures',actif:true,
+  risques:[{t:'Chute d’objets liés à un mauvais conditionnement',on:true},{t:'TMS liés au port de charges',on:true}],
+  mesures:[{t:'Prioriser toujours un moyen de manutention mécanique pour le chargement / déchargement',on:true},
+   {t:'Vérifier l’arrimage des charges dans les véhicules, sur les palettes.',on:true},
+   {t:'Vérifier l’état des supports de stockage utilisés (palettes…)',on:true}]},
+ {operation:'Transport de boues de dragage',ancre:'Transport de boues de dragage',actif:true,
+  risques:[{t:'Déversement des matériaux',on:true},{t:'Coactivité engins / piétons pendant le chargement',on:true},{t:'Blessures / heurt lors de l’ouverture des bennes',on:true}],
+  mesures:[{t:'Transport des boues de dragage dans des bennes étanches. Assurer la fermeture des portes avec les brêleurs.',on:true},
+   {t:'Lors des chargements / déchargements, le chauffeur PL doit rester dans la cabine de son PL',on:true},
+   {t:'S’il sort de sa cabine, port des EPI obligatoires (gilet haute visibilité, casque de protection, chaussures de sécurité',on:true},
+   {t:'Maintien de la propreté du PL, des feux de circulation. Nettoyage de la voirie en cas de salissure.',on:true},
+   {t:'Respecter le plan de circulation du chantier. Le conducteur de la pelle CDES est le seul autorisé à donner les consignes lors des opérations.',on:true},
+   {t:'Signaler tous incidents au responsable du chantier',on:true},
+   {t:'Respecter les consignes de sécurités spécifiques aux sites de dépôt, vasières…',on:true},
+   {t:'Sur les bateaux, pour guider le pelleur lors du chargement / déchargement, le marinier doit respecter une distance de sécurité avec le bras de pelle. Casque de protection obligatoire. Casquette coquée interdite. Gilet de sauvetage obligatoire sur l’eau.',on:true}]},
+ {operation:'Transport de déchets par les entreprises spécialisées',ancre:'Transport de déchets par les entreprises',actif:false,
+  risques:[{t:'Exposition à des substances dangereuses',on:true},{t:'Blessures avec les déchets',on:true},{t:'Pollution',on:true}],
+  mesures:[{t:'Respecter le plan de circulation au dépôt. Se faire accompagner par un intervenant CDES jusqu’à la zone de stockage des déchets (enlèvement)',on:true},
+   {t:'Port des EPI (gants de manutention) pour éviter le risque de contact direct avec des déchets.',on:true},
+   {t:'Utiliser les contenants adaptés étanches mis à disposition',on:true},
+   {t:'Traçabilité assurée à partir du suivi des BSD.',on:true},
+   {t:'Identification des déchets sur les bennes et les caisses palettes.',on:true},
+   {t:'Moyens anti-pollution présents au dépôt CDES et sur les chantiers en cas de déversement, salissures au sol.',on:true}]},
+ {operation:'Transport d’engins de chantier et matériel lourd en porte-engins',ancre:'Transport d’engins de chantier et matériel lourd',actif:false,
+  risques:[{t:'Chute de l’engin ou de l’équipement / basculement',on:true},{t:'Mauvais arrimage',on:true},{t:'Heurt avec un équipement',on:true}],
+  mesures:[{t:'Chargement sur sol stabilisé, sans obstacle à proximité',on:true},
+   {t:'Habilitations et formations CACES pour conduire les engins de manutention et monter les engins sur les PE (pelles, grue auxiliaire)',on:true},
+   {t:'Interdiction de stationner sous charge. Ne pas entrer dans une zone de manœuvre. Respecter une distance de sécurité > 3m avec les engins.',on:true},
+   {t:'Port du casque obligatoire à proximité des zones de manœuvre (cour extérieure) et vêtements haute visibilité.',on:true},
+   {t:'Porte-engin adapté à la charge avec des points d’ancrage conformes.',on:true},
+   {t:'Contrôle visuel des équipements d’arrimage avant chaque intervention (sangle, cliquets, chaînes…)',on:true},
+   {t:'Vérifier systématiquement l’arrimage de la charge, la tension des chaînes avant de circuler.',on:true},
+   {t:'Faire guider le PL sur le chantier pour les manœuvres. Sécuriser les voies de circulation pendant l’intervention.',on:true},
+   {t:'Toujours gérer le balancement des charges lourdes avec un système de retenue (corde)',on:true}]},
+ {operation:'Transport de produits chimiques, dépotage de carburant',ancre:'Transport de produits chimiques, dépotage',actif:false,
+  risques:[{t:'Déversement de produits polluants et dangereux',on:true},{t:'Incendie',on:true},{t:'Intoxication',on:true}],
+  mesures:[{t:'Respecter le plan de circulation au dépôt. Se faire accompagner par un intervenant CDES jusqu’à la zone de déchargement, cuve à remplir',on:true},
+   {t:'Port des EPI (gants de manutention) pour éviter le risque de contact direct avec les produits chimiques',on:true},
+   {t:'Traçabilité assurée à partir du suivi des BSD.',on:true},
+   {t:'Identification des produits sur les contenants, présence des FDS pour les produits utilisés par CDES.',on:true},
+   {t:'Lors des dépotages de carburant, contrôle des flexibles et branchements',on:true},
+   {t:'Moyens anti-pollution présents au dépôt CDES et sur les chantiers en cas de déversement, salissures au sol.',on:true}]}
+];
+/* EPI de la trame mariniers (ligne « Chantiers CDES ») : gilet HV, chaussures,
+   gants, gilet de sauvetage, casque. */
+const PROT_EPI_DEFAUT_MARINIER=[true,true,true,true,true,false,false];
+/* Mode opératoire proposé pour un bateau : composé UNIQUEMENT des règles écrites
+   dans la trame mariniers (lettre d'engagement et opération « boues de dragage »).
+   À relire et adapter à chaque opération. */
+const PROT_MODE_OPERATOIRE_MARINIER=
+"Le mode opératoire ci-dessous définit les actions à réaliser par le marinier et le personnel CDES, dans l'ordre :\n"+
+"1. Arrivée du bateau, contact avec le responsable CDES de l'opération, remise et signature du présent protocole.\n"+
+"2. Amarrage sur la zone convenue avec CDES ; gilet de sauvetage porté pour toute sortie de la timonerie (amarrage, plats-bords, chargement / déchargement).\n"+
+"3. Pendant le chargement / déchargement : le marinier reste à distance de sécurité du bras de pelle, visible du pelleur ou du grutier, casque et chaussures de sécurité en cas de manutention. Le conducteur de la pelle CDES est le seul à donner les consignes.\n"+
+"4. Répartition des charges dans la cale respectée ; échelles attachées pour descendre dans la cale ; surfaces de circulation à bord propres et dégagées.\n"+
+"5. Contrôle avant départ (fermeture, propreté, amarres) et accord du responsable CDES.\n"+
+"6. Tout incident, anomalie ou situation dangereuse est signalé immédiatement au responsable CDES.";
+
 const PROT_SECOURS={
  sst:'Liste SST dans les bases vie + panneau entrée CDES\nTrousse de secours salle de pause Atelier Dépôt CDES + fourgons des collaborateurs CDES',
  pollution:'Moyens anti-pollution à disposition au dépôt CDES\nAbsorbants dans les cuves de GNR des engins',
@@ -308,7 +413,8 @@ const PPSPS_AVIS=['Avis du médecin du travail sollicité','Avis du CSE sollicit
 const ETAPES_PAR_TYPE={
  pdp:      ['Chantier','Organismes','Organisation','Inspection commune','Risques','EPI & consignes','Secours & signatures','Annexes'],
  ppsps:    ['Chantier','Organismes','Coordination SPS','Organisation','Inspection commune','Risques','EPI & consignes','Secours & signatures','Annexes'],
- protocole:['Transport','Moyens & mode opératoire','Risques transport','EPI & consignes','Secours & signatures','Annexes']
+ protocole:['Transport','Moyens & mode opératoire','Risques transport','EPI & consignes','Secours & signatures','Annexes'],
+ marinier: ['Transport','Moyens & mode opératoire','Risques transport','EPI & consignes','Secours & signatures','Annexes']
 };
 
 /* --- plan de prévention : diffusion et information (R.4514-1 à 3) ---------- */
@@ -350,7 +456,7 @@ const PDP_SIGNATAIRES=['Entreprise Extérieure','Entreprise Utilisatrice'];
    le signe. */
 const PPSPS_SIGNATAIRES=['Entreprise intervenante'];
 function signatairesDe(type){
-  return type==='protocole'?PROT_SIGNATAIRES:(type==='ppsps'?PPSPS_SIGNATAIRES:PDP_SIGNATAIRES);
+  return estTypeProtocole(type)?PROT_SIGNATAIRES:(type==='ppsps'?PPSPS_SIGNATAIRES:PDP_SIGNATAIRES);
 }
 
 /* ============================================================================

@@ -476,3 +476,247 @@ async function reprendrePhotosMemoire(images) {
   }
   return n;
 }
+
+/* ----------------------- reprise d'un PDP existant ------------------------
+ * V19. Un plan de prévention déjà rédigé (Word ou PDF) sert de base au nouveau :
+ * le document est lu, le serveur en tire une transcription structurée, et TOUT
+ * est affiché en propositions à cocher. Les opérations et situations retrouvées
+ * dans la bibliothèque reprennent la ligne de la trame ; les autres deviennent
+ * des lignes sur mesure (fabriquées sur le gabarit de la trame dans le Word).
+ * Aucun nom de personne n'est repris : l'annuaire s'en charge.
+ * ------------------------------------------------------------------------- */
+let repriseExtrait = null;
+
+/** Texte lisible d'un .docx, lu dans le navigateur : un paragraphe par ligne,
+ *  les cellules d'une même ligne de tableau séparées par « | ». */
+async function texteDuDocx(buf) {
+  const entrees = zipLire(buf);
+  const e = entrees.find(x => x.nom === 'word/document.xml');
+  if (!e) throw new Error('Ce fichier n’est pas un document Word (.docx)');
+  const xml = await zipTexte(e);
+  return xml
+    .replace(/<w:tab\/>/g, '\t').replace(/<w:br\/>/g, '\n')
+    .replace(/<\/w:tc>/g, ' | ').replace(/<\/w:tr>/g, '\n').replace(/<\/w:p>/g, '\n')
+    .replace(/<w:sym[^>]*w:char="F0FE"[^>]*\/>/g, '☒').replace(/<w:sym[^>]*w:char="F0A8"[^>]*\/>/g, '☐')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/[ \t]+\|/g, ' |').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+async function reprendrePdp(inp) {
+  const f = inp.files[0]; inp.value = '';
+  if (!f || !cur) return;
+  const box = document.getElementById('ia-reprise');
+  if (!box) return;
+  if (f.size > 8 * 1024 * 1024) {
+    box.innerHTML = '<div class="avert">Fichier trop lourd (' + Math.round(f.size / 1048576) + ' Mo), 8 Mo au maximum.</div>';
+    return;
+  }
+  const estDocx = /\.docx$/i.test(f.name);
+  box.innerHTML = '<div class="avert info">📥 Lecture du plan de prévention… une à deux minutes pour un document complet.</div>';
+  try {
+    let charge;
+    if (estDocx) {
+      const texte = await texteDuDocx(await f.arrayBuffer());
+      charge = { nom: f.name, texte: texte };
+    } else {
+      const b64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(String(r.result).split(',')[1]);
+        r.onerror = () => rej(new Error('Fichier illisible'));
+        r.readAsDataURL(f);
+      });
+      charge = { nom: f.name, contenu: b64 };
+    }
+    charge.catalogues = Object.assign(catalogues(), { frequences: FREQUENCES, roles: ROLES_EXT });
+    const j = await appel('ia-pdp', charge, 240000);
+    if (!j || typeof j.extrait !== 'object' || !j.extrait)
+      throw new Error('Le serveur a répondu, mais sans le contenu attendu : il ne tourne pas encore sur la '
+        + 'version V2.1 du script. Colle le dernier Code_PDP_V2.gs puis Déployer ▸ Gérer ▸ ✏️ ▸ Nouvelle version.');
+    repriseExtrait = j.extrait;
+    repriseExtrait._meta = { caracteres: j.caracteres || 0, tronque: !!j.tronque, source: j.source || '', nom: f.name };
+    renderReprise();
+  } catch (e) {
+    box.innerHTML = '<div class="avert"><b>Lecture impossible :</b><br>' + esc(e.message) + '</div>';
+  }
+}
+
+/** Rapproche un libellé d'une liste de référence (égalité ou préfixe, accents
+ *  et casse ignorés) ; renvoie l'élément de la liste ou null. Jamais l'inclusion
+ *  quelconque : « Déchargement » ne doit pas retrouver « Chargement ». */
+function rapprocher(txt, liste, cle) {
+  const k = sansAccent(String(txt || '')).toLowerCase().replace(/[☒☐]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!k) return null;
+  for (const x of liste) {
+    const a = sansAccent(String(cle ? cle(x) : x)).toLowerCase().replace(/\s+/g, ' ').trim();
+    if (a === k || (k.length >= 12 && a.indexOf(k) === 0) || (a.length >= 12 && k.indexOf(a) === 0)) return x;
+  }
+  return null;
+}
+
+const CHAMPS_REPRISE = [
+  { k: 'titre', l: 'Intitulé du chantier' }, { k: 'lieu', l: 'Lieu de l’intervention' },
+  { k: 'departement', l: 'Département' }, { k: 'description', l: 'Description des travaux' },
+  { k: 'nature', l: 'Nature des opérations' }, { k: 'frequence', l: 'Fréquence' },
+  { k: 'dateDebut', l: 'Date de début' }, { k: 'dateFin', l: 'Date de fin' }, { k: 'duree', l: 'Durée' },
+  { k: 'horaires', l: 'Horaires' }
+];
+function renderReprise() {
+  const box = document.getElementById('ia-reprise');
+  if (!box) return;
+  if (!repriseExtrait) { box.innerHTML = ''; return; }
+  const x = repriseExtrait, m = x._meta || {};
+  if (!x._choix) {
+    const c = x._choix = { champs: {}, moa: !!(x.moa && x.moa.nom), moe: !!(x.moe && x.moe.nom),
+      effectifs: !!Object.values(x.effectifs || {}).some(Boolean),
+      ext: (x.entreprisesExt || []).map(() => true), hab: (x.habilitations || []).map(() => true),
+      ops: (x.operations || []).map(() => true), imp: (x.importes || []).map(() => true),
+      coa: (x.coactivite && x.coactivite.lignes || []).map(() => true),
+      epi: (x.epi || []).slice(), consignes: (x.consignes || []).slice() };
+    CHAMPS_REPRISE.forEach(f => { if (x[f.k]) c.champs[f.k] = true; });
+  }
+  const c = x._choix;
+  const ck = (on, action, html) => `<div class="ck ${on ? 'on' : ''}" onclick="${action};renderReprise()">
+     <span class="bx">${on ? '✓' : ''}</span><span class="tx">${html}</span></div>`;
+  const tog = expr => `${expr}=!${expr}`;
+  const lignesTxt = l => (l.risques || []).length + ' risque(s) · ' + (l.mesures || []).length + ' mesure(s)';
+  const conf = { haute: ['ok', 'élevée'], moyenne: ['', 'moyenne'], faible: ['', 'faible'] }[x.confiance] || ['', '?'];
+  const nbSit = (x.operations || []).reduce((n, o) => n + (o.lignes || []).length, 0);
+  const famillesTrouvees = (x.operations || []).filter(o => rapprocher(o.nom, BIBLIO, f => f.famille)).length;
+
+  box.innerHTML = `<div class="bloc exp"><div class="bh"><span class="pic">📥</span>
+     <b>Lu dans le plan de prévention existant<span class="sd">${esc(m.nom || '')} · ${m.source || ''} · ${m.caracteres || 0} caractères · confiance ${esc(conf[1])}</span></b></div>
+   <div class="bb">
+   <div class="avert ${conf[0]}">Transcription du document, pas une analyse : relis chaque bloc et décoche ce qui ne vaut
+   pas pour ce nouveau chantier. Les noms et téléphones ne sont jamais repris, l’annuaire s’en charge.
+   ${m.tronque ? '<br><b>Document long : seule la première partie a été lue.</b>' : ''}</div>
+
+   <h3>Chantier</h3>
+   ${CHAMPS_REPRISE.map(f => x[f.k] ? ck(c.champs[f.k], tog(`repriseExtrait._choix.champs['${f.k}']`),
+      `<span class="muted small">${esc(f.l)}</span><br>${esc(/^date/.test(f.k) ? frDate(x[f.k]) : x[f.k])}`) : '').join('')}
+   ${x.moa && x.moa.nom ? ck(c.moa, tog('repriseExtrait._choix.moa'), `<span class="muted small">Maître d’ouvrage</span><br>${esc([x.moa.nom, x.moa.adresse, x.moa.tel].filter(Boolean).join(' — '))}`) : ''}
+   ${x.moe && x.moe.nom ? ck(c.moe, tog('repriseExtrait._choix.moe'), `<span class="muted small">Maître d’œuvre</span><br>${esc([x.moe.nom, x.moe.adresse, x.moe.tel].filter(Boolean).join(' — '))}`) : ''}
+   ${Object.values(x.effectifs || {}).some(Boolean) ? ck(c.effectifs, tog('repriseExtrait._choix.effectifs'),
+      `<span class="muted small">Effectifs</span><br>${esc(['cdes', 'interim', 'fluvial', 'transport'].filter(k => x.effectifs[k]).map(k => ({ cdes: 'CDES', interim: 'intérim', fluvial: 'fluvial', transport: 'transport' })[k] + ' : ' + x.effectifs[k]).join(' · '))}`) : ''}
+
+   ${(x.entreprisesExt || []).length ? '<h3>Entreprises extérieures</h3>' + x.entreprisesExt.map((e, i) => ck(c.ext[i], tog(`repriseExtrait._choix.ext[${i}]`),
+      `<b>${esc(e.nom)}</b> <span class="muted small">${esc(e.role || '')}${e.adresse ? ' — ' + esc(e.adresse) : ''}</span>`)).join('') : ''}
+
+   ${(x.habilitations || []).length ? '<h3>Habilitations</h3>' + x.habilitations.map((h, i) => ck(c.hab[i], tog(`repriseExtrait._choix.hab[${i}]`),
+      `${h.nombre ? '<b>' + esc(h.nombre) + '</b> · ' : ''}${esc(h.activite)}<br><span class="muted small">${esc(h.habilitations)}</span>`)).join('') : ''}
+
+   ${(x.operations || []).length ? `<h3>Opérations et situations de travail <span class="muted">(${nbSit} situation(s))</span></h3>
+     <p class="hint">${famillesTrouvees} opération(s) sur ${x.operations.length} correspondent à une activité de la bibliothèque : elles reprennent les lignes de la trame. Les autres sont créées sur mesure, avec le texte du document.</p>`
+     + x.operations.map((o, i) => { const fam = rapprocher(o.nom, BIBLIO, f => f.famille);
+       return ck(c.ops[i], tog(`repriseExtrait._choix.ops[${i}]`),
+       `<b>${esc(o.nom || 'Opération')}</b> ${fam ? '<span class="badge fini">' + (fam.picto || '') + ' bibliothèque</span>' : '<span class="badge brouillon">sur mesure</span>'}<br>
+        <span class="muted small">${(o.lignes || []).map(l => esc(l.danger)).join(' · ') || 'aucune situation'}</span>`); }).join('') : ''}
+
+   ${(x.importes || []).length ? '<h3>Risques importés (site et environnement)</h3>' + x.importes.map((l, i) => ck(c.imp[i], tog(`repriseExtrait._choix.imp[${i}]`),
+      `${esc(l.danger)}<br><span class="muted small">${lignesTxt(l)}</span>`)).join('') : ''}
+
+   ${x.coactivite && !x.coactivite.aucune && (x.coactivite.lignes || []).length ? '<h3>Coactivité</h3>' + x.coactivite.lignes.map((l, i) => ck(c.coa[i], tog(`repriseExtrait._choix.coa[${i}]`),
+      `${esc(l.danger)}<br><span class="muted small">${lignesTxt(l)}</span>`)).join('') : ''}
+
+   ${(x.epi || []).length ? '<h3>EPI</h3>' + x.epi.map(e => ck(c.epi.includes(e), `bascListe(repriseExtrait._choix.epi,${JSON.stringify(e).replace(/"/g, '&quot;')})`, esc(e))).join('') : ''}
+   ${(x.consignes || []).length ? '<h3>Consignes particulières</h3>' + x.consignes.map(t => ck(c.consignes.includes(t), `bascListe(repriseExtrait._choix.consignes,${JSON.stringify(t).replace(/"/g, '&quot;')})`, esc(t))).join('') : ''}
+
+   <div class="row" style="margin-top:12px">
+     <button class="btn btn-primary grow" onclick="appliquerReprise()">✓ Reprendre ce que j’ai coché</button>
+     <button class="btn btn-ghost" onclick="repriseExtrait=null;renderReprise()">Ignorer</button></div>
+   <p class="hint">Ce qui est repris s’ajoute au document en cours sans effacer ce que tu as déjà saisi.</p>
+   </div></div>`;
+}
+function bascListe(l, v) { const i = l.indexOf(v); if (i >= 0) l.splice(i, 1); else l.push(v); }
+
+/** Construit une situation de travail à partir d'une ligne lue, en la
+ *  rapprochant si possible d'une ligne de la bibliothèque (famille donnée ou
+ *  toutes) : les risques/mesures du catalogue sont cochés quand le document
+ *  les cite, les autres restent décochés, et ce que le document ajoute vient
+ *  en plus, coché. */
+function ligneDepuisReprise(l, famille) {
+  const candidates = famille ? famille.lignes : BIBLIO.flatMap(f => f.lignes);
+  const ref = rapprocher(l.danger, candidates, x => x.danger);
+  const items = (cat, lus) => {
+    const out = cat.map(t => ({ txt: t, on: !!rapprocher(t, lus) || !!lus.some(u => rapprocher(u, [t])) }));
+    lus.forEach(u => { if (!rapprocher(u, cat)) out.push({ txt: u, on: true }); });
+    return out;
+  };
+  if (ref) return { source: ref.danger, danger: ref.danger, on: true, significatif: false,
+    risques: items(ref.risques, l.risques || []), mesures: items(ref.mesures, l.mesures || []) };
+  return { danger: l.danger, on: true, significatif: false,
+    risques: (l.risques || []).map(t => ({ txt: t, on: true })),
+    mesures: (l.mesures || []).map(t => ({ txt: t, on: true })) };
+}
+function appliquerReprise() {
+  if (!repriseExtrait || !cur) return;
+  const x = repriseExtrait, c = x._choix, faits = [];
+  CHAMPS_REPRISE.forEach(f => {
+    if (!c.champs[f.k] || !x[f.k]) return;
+    if (f.k === 'departement') { cur.departement = String(x[f.k]).padStart(2, '0'); appliquerCarnet(cur.departement); }
+    else if (f.k === 'horaires') cur.horairesTexte = x.horaires;
+    else cur[f.k] = x[f.k];
+    faits.push(f.l.toLowerCase());
+  });
+  if (c.moa && x.moa) { cur.moa = { nom: x.moa.nom || '', adresse: x.moa.adresse || '', tel: x.moa.tel || '' }; faits.push('maître d’ouvrage'); }
+  if (c.moe && x.moe) { cur.moe = { nom: x.moe.nom || '', adresse: x.moe.adresse || '', tel: x.moe.tel || '' }; faits.push('maître d’œuvre'); }
+  if (c.effectifs && x.effectifs) { ['cdes', 'interim', 'fluvial', 'transport'].forEach(k => { if (x.effectifs[k]) cur.effectifs[k] = x.effectifs[k]; }); faits.push('effectifs'); }
+  if (!cur.titreCourt && cur.titre) cur.titreCourt = cur.titre;
+
+  let n = 0;
+  (x.entreprisesExt || []).forEach((e, i) => {
+    if (!c.ext[i] || cur.entreprisesExt.some(y => rapprocher(y.nom, [e.nom]))) return;
+    cur.entreprisesExt.push({ role: e.role || ROLES_EXT[0], nom: e.nom, adresse: e.adresse || '', effectif: e.effectif || '' }); n++;
+  });
+  if (n) faits.push(n + ' entreprise(s)');
+
+  n = 0;
+  if (!Array.isArray(cur.habilitations)) cur.habilitations = [];
+  (x.habilitations || []).forEach((h, i) => {
+    if (!c.hab[i] || cur.habilitations.some(y => rapprocher(y.activite, [h.activite]))) return;
+    cur.habilitations.push({ nombre: h.nombre || '', activite: h.activite || '', habilitations: h.habilitations || '' }); n++;
+  });
+  if (n) faits.push(n + ' habilitation(s)');
+
+  n = 0;
+  (x.operations || []).forEach((o, i) => {
+    if (!c.ops[i]) return;
+    const fam = rapprocher(o.nom, BIBLIO, f => f.famille);
+    const lignes = (o.lignes || []).map(l => ligneDepuisReprise(l, fam));
+    if (fam) {
+      const k = cur.risques.exportes.findIndex(op => op.source === fam.famille && !op.lignes.length);
+      const op = { source: fam.famille, nom: o.nom || fam.famille, picto: fam.picto, numeroter: fam.famille !== 'Autres risques', lignes: lignes };
+      if (k >= 0) cur.risques.exportes[k] = op; else cur.risques.exportes.push(op);
+    } else cur.risques.exportes.push({ source: '', nom: o.nom || 'Opération reprise', picto: '📥', numeroter: true, libre: true, lignes: lignes });
+    n++;
+  });
+  if (n) faits.push(n + ' opération(s)');
+
+  n = 0;
+  (x.importes || []).forEach((l, i) => {
+    if (!c.imp[i]) return;
+    const ref = rapprocher(l.danger, RISQUES_ENV, r => r.danger);
+    if (ref && cur.risques.importes.some(y => y.source === ref.danger)) return;
+    const ligne = ligneDepuisReprise(l, { lignes: RISQUES_ENV });
+    cur.risques.importes.push(ligne); n++;
+  });
+  if (n) faits.push(n + ' risque(s) importé(s)');
+
+  n = 0;
+  if (x.coactivite && !x.coactivite.aucune) (x.coactivite.lignes || []).forEach((l, i) => {
+    if (!c.coa[i]) return;
+    cur.risques.coactivite.aucune = false;
+    cur.risques.coactivite.lignes.push({ danger: l.danger, on: true, significatif: false,
+      risques: (l.risques || []).map(t => ({ txt: t, on: true })), mesures: (l.mesures || []).map(t => ({ txt: t, on: true })) }); n++;
+  });
+  if (n) faits.push(n + ' interférence(s)');
+
+  if (c.epi.length) { EPI.forEach((e, i) => { if (c.epi.includes(e.nom)) cur.epi[i].on = true; }); faits.push(c.epi.length + ' EPI'); }
+  n = 0;
+  c.consignes.forEach(t => { if (!cur.consignes.particulieres.some(k => rapprocher(k.t, [t]))) { cur.consignes.particulieres.push({ t: t, on: true }); n++; } });
+  if (n) faits.push(n + ' consigne(s)');
+
+  repriseExtrait = null;
+  majDoc(); renderEtapes();
+  toast(faits.length ? 'Repris : ' + faits.join(', ') + ' ✓' : 'Rien de coché', !faits.length);
+}

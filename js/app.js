@@ -1,7 +1,7 @@
 /* ============================================================================
    Plans de prévention CDES — logique de l'application
    ========================================================================= */
-const APP_VERSION='V18', APP_DATE='5 octobre 2026';   // V18 = V17 sécurisée (migration compte CDES)
+const APP_VERSION='V19', APP_DATE='16 octobre 2026';   // V19 = reprise d'un PDP existant, tâches sur mesure, habilitations
 const LS='pdp_app_v2';
 
 let state={docs:[],carnet:null,agences:null};
@@ -11,7 +11,7 @@ const todayISO=new Date().toISOString().slice(0,10);
    n'a ni inspection commune, ni organismes de prévention ; un PPSPS a en plus
    la coordination SPS, que le plan de prévention ignore. */
 function etapes(){return ETAPES_PAR_TYPE[(cur&&cur.type)||'pdp']||ETAPES_PAR_TYPE.pdp}
-function estProtocole(){return !!(cur&&cur.type==='protocole')}
+function estProtocole(){return !!(cur&&estTypeProtocole(cur.type))}
 
 /* ------------------------------- outils ---------------------------------- */
 function uid(){return 'd'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)}
@@ -32,7 +32,8 @@ function fermerModal(){document.querySelectorAll('.modal').forEach(m=>m.classLis
 /* Bloc propre au protocole de sécurité : CDES y est l'entreprise UTILISATRICE,
    le transporteur est l'entreprise intervenante. Rôles inversés par rapport au
    plan de prévention — c'est la différence structurante du document. */
-function protVierge(){
+function protVierge(type){
+  if(type==='marinier')return protMarinierVierge();
   return {lieu:PROT_LIEUX[0],adresseChantier:'',
     transporteurType:PROT_TRANSPORTEUR[0],
     transporteur:{nom:'',adresse:'',tel:'',responsable:''},
@@ -45,6 +46,27 @@ function protVierge(){
     risques:PROT_RISQUES.map(o=>({operation:o.operation,on:true,
       risques:o.risques.map(r=>({txt:r.t,on:r.on})),mesures:o.mesures.map(m=>({txt:m.t,on:m.on}))})),
     epi:PROT_EPI_LIGNES.map(()=>PROT_EPI_DEFAUT.slice()),
+    consignes:PROT_CONSIGNES.map(t=>({t,on:true})),
+    secours:JSON.parse(JSON.stringify(PROT_SECOURS)),
+    pretMateriel:PROT_PRET_MATERIEL,
+    diffusion:JSON.parse(JSON.stringify(PROT_DIFFUSION))};
+}
+/* Protocole mariniers : les valeurs cochées de la trame « mariniers » — bateau,
+   cale, pelle, vrac, sédiments, opérations répétitives, chargement et
+   déchargement — et ses sept opérations. */
+function protMarinierVierge(){
+  return {lieu:PROT_LIEUX_MARINIER[0],adresseChantier:'',
+    transporteurType:PROT_TRANSPORTEUR[0],
+    transporteur:{nom:'',adresse:'',tel:'',responsable:''},
+    mode:PROT_MODES[1],operation:PROT_OPERATIONS[2],
+    nature:PROT_NATURES_MARINIER[0],natureDetail:'',frequence:PROT_FREQUENCES[1],
+    engins:['Bateau','Grue mobile'],enginsAutre:'',logistique:['Cale, caisson, fourgon'],logistiqueAutre:'',
+    manutention:['Pelle mécanique / engins TP'],manutentionAutre:'',conditionnement:['Vrac'],
+    modeOperatoire:PROT_MODE_OPERATOIRE_MARINIER,
+    habilitations:PROT_HABILITATIONS.map(h=>({activite:h.activite,habilitations:h.habilitations,on:/bateau/i.test(h.activite)})),
+    risques:PROT_RISQUES_MARINIER.map(o=>({operation:o.operation,ancre:o.ancre,on:o.actif,
+      risques:o.risques.map(r=>({txt:r.t,on:r.on})),mesures:o.mesures.map(m=>({txt:m.t,on:m.on}))})),
+    epi:PROT_EPI_LIGNES.map(()=>PROT_EPI_DEFAUT_MARINIER.slice()),
     consignes:PROT_CONSIGNES.map(t=>({t,on:true})),
     secours:JSON.parse(JSON.stringify(PROT_SECOURS)),
     pretMateriel:PROT_PRET_MATERIEL,
@@ -85,7 +107,7 @@ function docVierge(type){
       condManuel:false,respManuel:false},
     diffusion:JSON.parse(JSON.stringify(PDP_DIFFUSION)),
     sps:spsVierge(),
-    prot:protVierge(),
+    prot:protVierge(type),
     annexes:[],
     photos:[],
     logos:{},
@@ -158,7 +180,7 @@ function renderDocs(){
   const visibles=docsVisibles();
   if(!visibles.length){box.innerHTML='<div class="empty"><div class="big">📁</div>Aucun document.<br>Touche « ＋ Nouveau document ».</div>';return}
   box.innerHTML=visibles.map(d=>{const t=TYPES.find(x=>x.code===d.type)||TYPES[0];
-    const n=(d.type==='protocole')?((d.prot&&d.prot.risques||[]).filter(r=>r.on).length+' opération(s) de transport')
+    const n=estTypeProtocole(d.type)?((d.prot&&d.prot.risques||[]).filter(r=>r.on).length+' opération(s) de transport')
       :((d.risques&&d.risques.exportes?d.risques.exportes.length:0)+' opération(s)');
     const na=(d.annexes||[]).length;
     return `<div class="doc" onclick="ouvrirDoc('${d.id}')">
@@ -213,7 +235,7 @@ function ecrire(ch,val){
 }
 /* --------- contacts d'urgence : renseignés seuls, mais surchargeables ------
    Le conducteur de travaux est celui déclaré à l'encadrement, le responsable
-   CDES est le chef de l'agence retenue. Dès que Justin écrit dans l'un des
+   CDES est le chef de l'agence retenue. Dès que le conducteur écrit dans l'un des
    deux champs, on cesse de l'écraser. */
 function urgenceAuto(){
   const e=(cur&&cur.encadrement)||{}, ag=agenceDe();
@@ -439,7 +461,7 @@ function etChantier(){
 /* ---------------------- photos de la page de garde -------------------------
    La page de garde de la trame est presque vide : dans le document d'origine,
    des vues du chantier tirées du mémoire technique occupaient ce blanc. On
-   laisse Justin y déposer ses images ; elles partent dans le .docx.        */
+   laisse le conducteur y déposer ses images ; elles partent dans le .docx.        */
 const PHOTOS_MAX = 4;
 function blocPhotos(){
   return `<div class="card"><h2><span class="ico">📷</span>Photos de la page de garde</h2>
@@ -680,15 +702,19 @@ function blocIA(){
       ?'Le serveur est branché mais aucune clé IA n’y est configurée. Ajoute la propriété GROQ_API_KEY au script Google.'
       :'Pas encore branchée. Réglages ▸ Branchement pour l’activer — l’appli marche très bien sans.'}</p></div>`;
   return `<div class="card"><h2><span class="ico">🤖</span>Assistance IA</h2>
-   <p class="small muted">Décris le chantier en quelques lignes, l’assistant propose la nature des
-   opérations, les activités à retenir, les risques importés, les EPI et des consignes
-   particulières. Tu coches ce que tu gardes.</p>
+   <p class="small muted">Trois façons de démarrer, cumulables : décris le chantier et l’assistant propose la nature des
+   opérations, les activités, les risques importés, les EPI et des consignes ; fais lire le <b>mémoire technique</b>
+   (maître d’ouvrage, lieu, dates, photos, logos) ; ou <b>repars d’un plan de prévention déjà rédigé</b>, Word ou PDF :
+   ses opérations, situations de travail, risques, mesures, EPI et consignes te sont proposés. Tu coches ce que tu gardes.</p>
    <div class="row">
      <button class="btn btn-accent grow" onclick="analyserChantier()">✨ Analyser la description</button>
      <button class="btn btn-ghost grow" onclick="document.getElementById('memoire-file').click()">📄 Lire un mémoire technique</button>
+     <button class="btn btn-ghost grow" onclick="document.getElementById('reprise-file').click()">📥 Reprendre un PDP existant</button>
      <input type="file" id="memoire-file" accept="application/pdf,.pdf" style="display:none" onchange="lireMemoire(this)">
+     <input type="file" id="reprise-file" accept=".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="display:none" onchange="reprendrePdp(this)">
    </div>
    <div id="ia-memoire" style="margin-top:10px"></div>
+   <div id="ia-reprise" style="margin-top:10px"></div>
    <div id="ia-panneau" style="margin-top:10px"></div>
    </div>`;
 }
@@ -821,6 +847,18 @@ function etOrganisation(){
    <div id="res-ext"></div>
    </div>
 
+   <div class="card"><h2><span class="ico">🎓</span>Habilitations et formations requises</h2>
+   <p class="small muted">Tableau § 4.1 du document : nombre de collaborateurs concernés, activité, habilitations exigées
+   (CACES, AIPR, permis fluvial, habilitation électrique…). Une ligne par activité.</p>
+   <div id="hab-list">${renderHab()}</div>
+   <div class="row" style="margin-top:8px">
+     <button class="btn btn-ghost btn-sm" onclick="addHab()">＋ Ajouter une habilitation</button>
+     ${HABILITATIONS_TYPES.length?`<select class="grow" onchange="if(this.value!==''){addHab(HABILITATIONS_TYPES[+this.value]);this.value=''}">
+       <option value="">— ou choisir une habilitation courante —</option>
+       ${HABILITATIONS_TYPES.map((h,i)=>`<option value="${i}">${esc(h.activite)}</option>`).join('')}</select>`:''}
+   </div>
+   </div>
+
    <div class="card"><h2><span class="ico">🕗</span>Horaires du chantier</h2>
    <div class="tbl-wrap"><table><tr><th>Jour</th><th>Matin</th><th>Après-midi</th></tr>
    ${j.map(x=>`<tr><td style="text-transform:capitalize">${x}</td>
@@ -839,6 +877,20 @@ function etOrganisation(){
    ${LOGISTIQUE_CHAMPS.map(m=>champ('logistique.'+m.k,m.l,{zone:true})).join('')}
    </div>`;
 }
+function renderHab(){
+  if(!Array.isArray(cur.habilitations))cur.habilitations=[];
+  if(!cur.habilitations.length)return '<p class="hint">Aucune habilitation déclarée. Le contrôle de cohérence le signalera si des engins apparaissent dans les risques.</p>';
+  return cur.habilitations.map((h,i)=>`<div class="ligne"><div class="row">
+      <input type="text" style="width:70px" value="${esc(h.nombre||'')}" oninput="majHab(${i},'nombre',this.value)" placeholder="Nb">
+      <input type="text" class="grow" value="${esc(h.activite||'')}" oninput="majHab(${i},'activite',this.value)" placeholder="Activité (ex. conduite de pelle)">
+      <button class="btn btn-danger btn-sm" onclick="delHab(${i})">✕</button></div>
+    <input type="text" style="margin-top:6px" value="${esc(h.habilitations||'')}" oninput="majHab(${i},'habilitations',this.value)" placeholder="Habilitations requises (ex. CACES R482 cat. B1 + autorisation de conduite)">
+    </div>`).join('');
+}
+function addHab(o){if(!Array.isArray(cur.habilitations))cur.habilitations=[];
+  cur.habilitations.push(Object.assign({nombre:'',activite:'',habilitations:''},o||{}));majDoc();renderEtape()}
+function majHab(i,k,v){cur.habilitations[i][k]=v;majDoc()}
+function delHab(i){cur.habilitations.splice(i,1);majDoc();renderEtape()}
 function majHoraire(j,q,v){HORAIRES_DEFAUT[j][q]=v;if(!cur.horaires)cur.horaires={};if(!cur.horaires[j])cur.horaires[j]={};cur.horaires[j][q]=v;majDoc()}
 function renderExt(){
   if(!cur.entreprisesExt.length)return '<p class="hint">Aucune entreprise extérieure déclarée.</p>';
@@ -929,13 +981,15 @@ function renderExportes(){
   box.innerHTML=`<div class="bloc exp"><div class="bh"><span class="pic">↗️</span>
      <b>Risques exportés<span class="sd">Générés par notre intervention — § 4.3 du document</span></b></div>
    <div class="bb">
-   <p class="small muted">Coche les activités du chantier : chacune devient une opération numérotée.</p>
+   <p class="small muted">Coche les activités du chantier : chacune devient une opération numérotée. Une tâche ou un
+   métier absent de la trame (palplanches, battage, tunage…) s’ajoute avec le bouton du bas : tu nommes l’opération,
+   puis ses situations de travail, risques et mesures. Elle sort dans le Word comme les autres.</p>
    ${BIBLIO.map((f,i)=>{const on=cur.risques.exportes.some(o=>o.source===f.famille);
      return `<div class="ck ${on?'on':''}" onclick="bascFamille(${i})"><span class="bx">${on?'✓':''}</span>
        <span class="tx"><span style="font-size:16px">${f.picto}</span> <b>${esc(f.famille)}</b>
        <span class="muted small">— ${f.lignes.length} situation(s)</span></span></div>`}).join('')}
    <div id="ops"></div>
-   <button class="btn btn-ghost btn-block btn-sm" style="margin-top:8px" onclick="addOpLibre()">＋ Opération sur mesure</button>
+   <button class="btn btn-accent btn-block btn-sm" style="margin-top:8px" onclick="addOpLibre()">＋ Ajouter une tâche ou un métier absent de la trame</button>
    </div></div>`;
   renderOps();
 }
@@ -950,8 +1004,13 @@ function bascFamille(i){
 function ligneDepuis(l){return {source:l.danger,danger:l.danger,on:true,significatif:false,
   risques:l.risques.map(t=>({txt:t,on:true})),mesures:l.mesures.map(t=>({txt:t,on:true}))}}
 function addOpLibre(){
-  cur.risques.exportes.push({source:'',nom:'Nouvelle opération',picto:'✳️',numeroter:true,libre:true,lignes:[]});
+  cur.risques.exportes.push({source:'',nom:'',picto:'✳️',numeroter:true,libre:true,
+    lignes:[{danger:'Nouvelle situation de travail',on:true,significatif:false,
+      risques:[{txt:'Risque à préciser',on:true}],mesures:[{txt:'Mesure à préciser',on:true}]}]});
   majDoc();renderEtape();
+  /* le conducteur nomme tout de suite sa tâche : on l'amène dessus */
+  const ops=document.querySelectorAll('#ops .op');const dern=ops[ops.length-1];
+  if(dern){dern.scrollIntoView({behavior:'smooth',block:'center'});const inp=dern.querySelector('.oh input');if(inp){inp.focus();}}
 }
 function renderOps(){
   const box=document.getElementById('ops');if(!box)return;
@@ -959,7 +1018,7 @@ function renderOps(){
    <div class="op"><div class="oh">
      <span class="pic">${op.picto||'⚙️'}</span>
      <span class="muted small">${op.numeroter===false?'—':'OP. '+(numeroOp(oi))}</span>
-     <input value="${esc(op.nom)}" oninput="majOp(${oi},this.value)">
+     <input value="${esc(op.nom)}" placeholder="${op.libre?'Nom de la tâche ou du métier (ex. Mise en place de palplanches)':'Nom de l’opération'}" oninput="majOp(${oi},this.value)">
      <button class="btn btn-ghost btn-xs" onclick="deplacerOp(${oi},-1)">↑</button>
      <button class="btn btn-ghost btn-xs" onclick="deplacerOp(${oi},1)">↓</button>
      <button class="btn btn-danger btn-xs" onclick="delOp(${oi})">✕</button>
@@ -1303,11 +1362,11 @@ function etProtTransport(){
    ${champ('titre','Intitulé de l’opération *',{ph:'Ex. Dépose des bungalows au dépôt de Luzancy'})}
    ${champ('titreCourt','Intitulé court (en-tête de page)',{ph:'Repris automatiquement du titre'})}
    ${champ('description','Description des travaux *',{zone:true,ph:'Ce qui est livré ou enlevé, par qui, avec quoi'})}
-   <div class="g2">${champ('prot.lieu','Lieu de l’intervention',{liste:PROT_LIEUX})}
+   <div class="g2">${champ('prot.lieu','Lieu de l’intervention',{liste:cur.type==='marinier'?PROT_LIEUX_MARINIER:PROT_LIEUX})}
    ${champ('prot.adresseChantier','Adresse du chantier',{ph:'Si l’opération n’a pas lieu au dépôt'})}</div>
    <div class="g2">${champ('prot.mode','Type de transport',{liste:PROT_MODES})}
    ${champ('prot.operation','Opération',{liste:PROT_OPERATIONS})}</div>
-   <div class="g2">${champ('prot.nature','Nature du transport',{liste:PROT_NATURES,vide:'— choisir —'})}
+   <div class="g2">${champ('prot.nature','Nature du transport',{liste:cur.type==='marinier'?PROT_NATURES_MARINIER:PROT_NATURES,vide:'— choisir —'})}
    ${champ('prot.natureDetail','Précision',{ph:'Ex. bungalows nouveaux bureaux'})}</div>
    ${champ('prot.frequence','Fréquence',{liste:PROT_FREQUENCES})}
    <div class="g3">${champ('dateDebut','Date de l’opération *',{type:'date'})}
@@ -1398,14 +1457,17 @@ function etProtRisques(){
    ${champ('prot.pretMateriel','Prêt de matériel',{zone:true})}
    </div>
    <div class="card"><h2><span class="ico">⚠️</span>Risques liés aux opérations de transport</h2>
-   <div class="avert info">Trois opérations, dans l’ordre du document : la circulation sur le site,
-   le chargement / déchargement, puis le transport lui-même. Décoche celles qui ne concernent pas
-   l’opération, ajuste les risques et les mesures.</div>
+   <div class="avert info">${cur.type==='marinier'
+     ?'Les sept opérations de la trame mariniers, dans son ordre. Trois sont actives par défaut (déchargement, fournitures, boues de dragage) : active celles que l’opération met en jeu, décoche les autres, ajuste les risques et les mesures. Une opération écartée disparaît du Word.'
+     :'Trois opérations, dans l’ordre du document : la circulation sur le site, le chargement / déchargement, puis le transport lui-même. Décoche celles qui ne concernent pas l’opération, ajuste les risques et les mesures.'}
+   Une opération absente de la trame s’ajoute en bas : elle sort dans le Word dans un tableau supplémentaire, au même gabarit.</div>
    </div>
    ${p.risques.map((o,oi)=>`<div class="bloc ${o.on?'exp':''}" style="${o.on?'':'opacity:.5'}">
      <div class="bh" style="${o.on?'':'background:#f3f7fb;color:var(--muted)'}">
        <span class="ck-mini ${o.on?'on':''}" onclick="bascProtOp(${oi})">${o.on?'✓':''}</span>
-       <b>${esc(o.operation)}<span class="sd">Opération ${oi+1} sur 3</span></b></div>
+       ${o.libre?`<input class="grow" value="${esc(o.operation)}" placeholder="Nom de l’opération (ex. Amarrage et accostage du bateau)" oninput="majProtOp(${oi},this.value)" onclick="event.stopPropagation()">
+         <button class="btn btn-danger btn-xs" onclick="delProtOp(${oi})">✕</button>`
+       :`<b>${esc(o.operation)}<span class="sd">Opération ${oi+1} sur ${p.risques.length}</span></b>`}</div>
      ${o.on?`<div class="bb"><div class="sous" style="margin-left:0">
        <h4>Risques liés à l’activité <span class="muted">(${o.risques.filter(r=>r.on).length}/${o.risques.length})</span>
          <button class="btn btn-ghost btn-xs add" onclick="addProtSous(${oi},'risques')">＋</button></h4>
@@ -1418,8 +1480,15 @@ function etProtRisques(){
          <span class="tt" contenteditable="true" onblur="majProtSous(${oi},'mesures',${i},this.innerText)">${esc(m.txt)}</span>
          <button class="x" onclick="delProtSous(${oi},'mesures',${i})">✕</button></div>`).join('')}
      </div></div>`:''}
-   </div>`).join('')}`;
+   </div>`).join('')}
+   <button class="btn btn-accent btn-block btn-sm" style="margin-top:8px" onclick="addProtOp()">＋ Ajouter une opération absente de la trame</button>`;
 }
+function addProtOp(){cur.prot.risques.push({operation:'',on:true,libre:true,
+  risques:[{txt:'Risque à préciser',on:true}],mesures:[{txt:'Mesure à préciser',on:true}]});majDoc();renderEtape();
+  const b=document.querySelectorAll('#etape-body .bloc');const d=b[b.length-1];
+  if(d){d.scrollIntoView({behavior:'smooth',block:'center'});const i=d.querySelector('.bh input');if(i)i.focus();}}
+function majProtOp(oi,v){cur.prot.risques[oi].operation=v;majDoc()}
+function delProtOp(oi){cur.prot.risques.splice(oi,1);majDoc();renderEtape()}
 function bascProtHab(i){cur.prot.habilitations[i].on=!cur.prot.habilitations[i].on;majDoc();renderEtape()}
 function bascProtOp(oi){cur.prot.risques[oi].on=!cur.prot.risques[oi].on;majDoc();renderEtape()}
 function bascProtSous(oi,cle,i){const x=cur.prot.risques[oi][cle][i];x.on=!x.on;majDoc();renderEtape()}
@@ -1463,15 +1532,16 @@ const TRAMES={
  ppsps:['PPSPS_trame.docx','Trame PPSPS 2026.docx','PPSPS.docx'],
  protocole:['Protocole_transport_trame.docx','Trame Protocole Sécurité Transport 2026.docx',
    'Protocole_trame.docx','Protocole.docx'],
+ marinier:['Protocole_marinier_trame.docx','Trame Protocole Sécurité Transport 2026 - mariniers.docx'],
  affichage:['Affichage_trame.docx','Trame  Affichage Obligatoire 2026.docx',
    'Trame Affichage Obligatoire 2026.docx']};
 /* Deux trames suffisent : le plan de prévention et le PPSPS partagent la même,
    le protocole a la sienne. Une fois chargée, elle est MÉMORISÉE sur l'appareil
    — plus besoin de la redonner à chaque ouverture. */
-const SLOT={pdp:'pdp',ppsps:'ppsps',protocole:'protocole',affichage:'affichage'};
+const SLOT={pdp:'pdp',ppsps:'ppsps',protocole:'protocole',marinier:'marinier',affichage:'affichage'};
 const SLOTS=[{k:'affichage',l:'Affichage obligatoire'},
              {k:'pdp',l:'Plan de prévention'},{k:'ppsps',l:'PPSPS'},
-             {k:'protocole',l:'Protocole de sécurité'}];
+             {k:'protocole',l:'Protocole de sécurité'},{k:'marinier',l:'Protocole mariniers'}];
 /* La trame déposée à côté du fichier (sur l'intranet) passe TOUJOURS devant la
    copie mémorisée sur l'appareil : remplacer la trame sur le site suffit,
    personne n'a à vider quoi que ce soit. La copie mémorisée sert quand le site
@@ -1727,6 +1797,8 @@ function preparerDonnees(){
   d.historique.dateFr=frDate(new Date().toISOString().slice(0,10));
   if(d.sps)d.sps.dateTransmissionFr=frDate(cur.sps.dateTransmission);
   d.annexesListe=(cur.annexes||[]).map(a=>a.titre||a.nom);   // numérotées à l'écriture
+  if(!d.organismes)d.organismes={};
+  if(!(d.organismes.hse&&d.organismes.hse.nom)&&COORDINATEUR_HSE.nom)d.organismes.hse=JSON.parse(JSON.stringify(COORDINATEUR_HSE));   // V19 : coordinateur QHSE depuis l'annuaire même si l'étape Organismes n'a pas été ouverte
   if(estProtocole()){
     d.prot.epiEtats=d.prot.epi;
     d.prot.epiLigne=ligneEpiProtocole();      // une seule ligne selon le lieu

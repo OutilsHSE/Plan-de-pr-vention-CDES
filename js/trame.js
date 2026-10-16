@@ -17,7 +17,7 @@ const ANCRES_TITRE = ['Nom du chantier', 'Dragage sur le réseau à petit gabari
   'Andernos les Bains', 'Bathymétrie - Chantier PRA Chaponval'];
 
 /* -------------------- illustrations de la page de garde ---------------------
-   La trame de Justin a une page de garde presque vide : dans le document
+   La trame CDES a une page de garde presque vide : dans le document
    d'origine, deux vues du chantier tirées du mémoire technique occupaient ce
    blanc. On les remet, en ligne, centrées, sous le titre.
    Le logo CDES est une image ANCRÉE dont la position verticale est comptée
@@ -192,7 +192,7 @@ function supprimerP(doc, ancre) {
    Jusqu'ici le moteur se contentait de SUPPRIMER les consignes décochées. Les
    consignes réécrites dans l'application, celles qui étaient ajoutées, et toute
    la liste des consignes particulières ne sortaient donc jamais dans le Word :
-   Justin voyait le texte de la trame à la place du sien. On réécrit désormais
+   le texte de la trame apparaissait à la place du sien. On réécrit désormais
    la liste entière en réutilisant les paragraphes de la trame comme moules —
    la numérotation, les retraits et la police restent ceux du modèle.        */
 function numIdDe(p) {
@@ -208,11 +208,24 @@ function listeDe(p0) {
   const num = numIdDe(p0), sty = styleDe(p0);
   const memeListe = p => p.localName === 'p' &&
     (num ? numIdDe(p) === num : (sty && styleDe(p) === sty));
+  /* la trame mariniers glisse un paragraphe vide (parfois porteur d'une image
+     ancrée) entre deux puces : on l'enjambe sans le toucher, la liste continue */
+  const vide = p => p.localName === 'p' && !texteDe(p).trim();
   const out = [p0];
   let n = p0.nextElementSibling;
-  while (n && memeListe(n)) { out.push(n); n = n.nextElementSibling; }
+  while (n) {
+    if (memeListe(n) && !vide(n)) { out.push(n); n = n.nextElementSibling; continue; }
+    if (vide(n)) { let k = n.nextElementSibling; while (k && vide(k)) k = k.nextElementSibling;
+      if (k && memeListe(k)) { n = k; continue; } }
+    break;
+  }
   let a = p0.previousElementSibling;
-  while (a && memeListe(a)) { out.unshift(a); a = a.previousElementSibling; }
+  while (a) {
+    if (memeListe(a) && !vide(a)) { out.unshift(a); a = a.previousElementSibling; continue; }
+    if (vide(a)) { let k = a.previousElementSibling; while (k && vide(k)) k = k.previousElementSibling;
+      if (k && memeListe(k)) { a = k; continue; } }
+    break;
+  }
   return out;
 }
 /**
@@ -734,6 +747,32 @@ function remplirPPSPS(doc, d) {
       String(d.horairesTexte).split('\n').filter(Boolean), true);
     if (n) note('mentions horaires');
   }
+  /* --- coordinateur QHSE : nom, fonction, téléphone depuis l'annuaire ----------
+     Les trames publiques n'en portent plus (V19) : les trois paragraphes qui suivent
+     « Coordinateur QHSE CDES : » sont réécrits depuis le Référentiel, ou vidés. */
+  {
+    const pQ = paragrapheParTexte(doc, 'Coordinateur QHSE CDES');
+    const hse = (d.organismes && d.organismes.hse) || {};
+    if (pQ) {
+      const lignesHse = [hse.nom || '', String(hse.adresse || '').split('\n')[0] || '', hse.tel ? 'Tél. ' + hse.tel : ''];
+      let suiv = pQ.nextSibling, i = 0;
+      while (suiv && i < 3) {
+        if (suiv.localName === 'tbl') break;
+        if (suiv.localName === 'p') {
+          const ts = texteDe(suiv).trim();
+          if (/^\d\.\d|RENSEIGNEMENTS|ORGANISMES/i.test(ts)) break;
+          /* les trames nettoyées portent trois paragraphes VIDES (nom, fonction, téléphone)
+             qui gardent leurs runs : on écrit dedans, vides ou non */
+          if (suiv.getElementsByTagNameNS(W, 't').length) {
+            Array.from(suiv.getElementsByTagNameNS(W, 'sym')).forEach(sy => sy.parentNode.removeChild(sy));
+            ecrireDansParagraphe(suiv, lignesHse[i]); i++;
+          }
+        }
+        suiv = suiv.nextSibling;
+      }
+      if (i) note(hse.nom ? 'coordinateur QHSE (annuaire)' : 'coordinateur QHSE : annuaire absent, lignes vidées');
+    }
+  }
 
   /* --- moyens matériels et logistique --------------------------------------- */
   if (d.moyens) {
@@ -1038,8 +1077,39 @@ function remplirProtocole(doc, d) {
     }
     note('entreprises : transporteur (intervenante) et CDES (utilisatrice)');
   }
-  const pDesc = paragrapheParTexte(doc, 'Dépose des nouveaux bungalows');
+  /* la trame transport porte un exemple (bungalows), la trame mariniers une
+     phrase générique : l'une ou l'autre reçoit la description */
+  const pDesc = paragrapheParTexte(doc, 'Dépose des nouveaux bungalows') ||
+                paragrapheParTexte(doc, 'Transport fluvial (fret) dans le cadre');
   if (pDesc && d.description) { ecrireDansParagraphe(pDesc, d.description); note('description des travaux'); }
+  /* trame mariniers : le coordinateur QHSE est écrit depuis l'annuaire, jamais laissé tel quel */
+  const pQhse = paragrapheParTexte(doc, 'Coordinateur QHSE CDES');
+  if (d.urgence && d.urgence.hse && pQhse) {
+    remplacerP(doc, 'Coordinateur QHSE CDES', 'Coordinateur QHSE CDES : ' + d.urgence.hse);
+    /* la trame porte le nom sur la ligne suivante : elle part, l'annuaire a parlé */
+    let suiv = pQhse.nextSibling, vus = 0;
+    while (suiv && vus < 4) {
+      if (suiv.localName === 'tbl') break;
+      if (suiv.localName === 'p') {
+        vus++;
+        const ts = texteDe(suiv).trim();
+        if (/JOURS|MATIN|Horaires/i.test(ts)) break;
+        // la ligne du nom (« M. … (fonction) ») et celle du téléphone (« ☎ 06 … »)
+        if (ts && ts.length < 120 && (/^(M\.|Mme|Mr|☎)/.test(ts) || /\d{2}[ .]\d{2}[ .]\d{2}[ .]\d{2}/.test(ts)))
+          ecrireDansParagraphe(suiv, '');
+      }
+      suiv = suiv.nextSibling;
+    }
+    /* le téléphone du coordinateur est un paragraphe à part, placé après le
+       tableau des horaires : un paragraphe qui n'est qu'un numéro part aussi */
+    Array.from(doc.getElementsByTagNameNS(W, 'p')).forEach(par => {
+      if (/^\s*\d{2}([ .]\d{2}){4}\s*$/.test(texteDe(par))) {
+        ecrireDansParagraphe(par, '');
+        Array.from(par.getElementsByTagNameNS(W, 'sym')).forEach(sy => sy.parentNode.removeChild(sy));
+      }
+    });
+    note('coordinateur QHSE');
+  }
   if (d.typeInfo) {
     remplacerP(doc, 'Etabli en application des article', d.typeInfo.sousTitre);
     note('type : ' + d.typeInfo.court2);
@@ -1076,7 +1146,9 @@ function remplirProtocole(doc, d) {
 
   /* --- horaires ------------------------------------------------------------ */
   const t4 = tableauParTexte(doc, 'JOURS', 'MATIN', 'APRES-MIDI');
-  if (t4 && d.horaires) {
+  /* protocole mariniers : la trame porte ses propres horaires (07h30, vendredi
+     16h) ; on ne les écrase que si le conducteur en a saisi */
+  if (t4 && d.horaires && !(d.type === 'marinier' && !d.horairesSaisis)) {
     ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'].forEach(j => {
       const h = d.horaires[j.toLowerCase()]; if (!h) return;
       const tr = ligneParTexte(t4, j); if (!tr) return;
@@ -1085,9 +1157,13 @@ function remplirProtocole(doc, d) {
     });
     note('horaires d’accès au site');
   }
-  if (d.horairesTexte)
-    remplacerP(doc, 'Les livraisons sont réalisées pendant les horaires habituels',
-      String(d.horairesTexte).split('\n').filter(Boolean).join('\n'));
+  if (d.horairesTexte) {
+    const ht = String(d.horairesTexte).split('\n').filter(Boolean).join('\n');
+    if (paragrapheParTexte(doc, 'Les livraisons sont réalisées pendant les horaires habituels'))
+      remplacerP(doc, 'Les livraisons sont réalisées pendant les horaires habituels', ht);
+    else if (paragrapheParTexte(doc, 'Les chargements / déchargements sont réalisé'))
+      remplacerP(doc, 'Les chargements / déchargements sont réalisé', ht);
+  }
 
   /* --- moyens : quatre lignes de cases à cocher ---------------------------- */
   const t5 = tableauParTexte(doc, 'ENGINS DE TRANSPORT', 'MOYENS LOGISTIQUES', 'CONDITIONNEMENT');
@@ -1140,25 +1216,58 @@ function remplirProtocole(doc, d) {
                     'manœuvre d’engins et opérations de levage',
                     'Transport de fournitures'];
   let nOps = 0;
-  ancresOp.forEach((ancre, i) => {
-    const tbl = tableauParTexte(doc, ancre, 'Mesures de prévention applicables');
-    if (!tbl) return;
-    const op = (p.risques || [])[i];
-    if (!op || !op.on) {                       // opération écartée : le tableau part
-      if (tbl.parentNode) tbl.parentNode.removeChild(tbl);
-      return;
-    }
+  /* Pour les opérations ajoutées par le conducteur (au-delà des trois de la
+     trame), on clone un tableau existant : même gabarit, même mise en forme.
+     Le modèle et le point d'insertion sont relevés AVANT toute suppression. */
+  let modele = null, parent = null, apres = null;
+  const remplirTableau = (tbl, op) => {
     const trs = lignes(tbl);
-    const trTitre = trs[0], trContenu = trs[2] || trs[trs.length - 1];
+    /* la ligne de contenu suit l'en-tête « Risques liés à l'activité » ; on ne
+       compte pas les lignes, la trame mariniers glisse un tableau de produits
+       chimiques avant cet en-tête */
+    const iEntete = trs.findIndex(tr => /risques li[ée]s/.test(normal(texteDe(tr))));
+    const trTitre = trs[0], trContenu = (iEntete >= 0 && trs[iEntete + 1]) || trs[2] || trs[trs.length - 1];
     if (trTitre) ecrireDansCellule(cellules(trTitre)[0], '☒ ' + op.operation);
     if (trContenu) {
       const cs = cellules(trContenu);
       if (cs[0]) ecrireCases(cs[0], (op.risques || []).filter(r => r.on).map(r => r.txt));
       if (cs[1]) ecrireCases(cs[1], (op.mesures || []).filter(m => m.on).map(m => m.txt));
     }
+  };
+  /* Les opérations de la trame : celles qui portent une « ancre » (protocole
+     mariniers, sept tableaux) ou, à défaut, les trois du protocole transport. */
+  const ops = p.risques || [];
+  const deTrame = ops.filter(o => o && !o.libre && (o.ancre || ancresOp[ops.indexOf(o)]));
+  deTrame.forEach(op => {
+    const ancre = op.ancre || ancresOp[ops.indexOf(op)];
+    const tbl = tableauParTexte(doc, ancre, 'Mesures de prévention applicables');
+    if (!tbl) return;
+    if (!modele) { modele = tbl.cloneNode(true); parent = tbl.parentNode; }
+    apres = tbl.nextSibling;                   // ce qui suit le dernier tableau de la trame
+    if (!op.on) {                              // opération écartée : le tableau part
+      if (tbl.parentNode) tbl.parentNode.removeChild(tbl);
+      return;
+    }
+    remplirTableau(tbl, op);
     nOps++;
   });
-  note(nOps + ' opération(s) de transport analysée(s)');
+  let nLibres = 0;
+  ops.filter(o => o && !deTrame.includes(o)).forEach(op => {
+    if (!op || !op.on || !modele || !parent) return;
+    const titre = String(op.operation || '').trim();
+    const utiles = (op.risques || []).concat(op.mesures || []).filter(x => x.on && !estGabarit(x.txt));
+    if (!titre || estGabarit(titre) || !utiles.length) return;   // gabarit laissé vide : pas dans le Word
+    /* deux tableaux qui se touchent fusionnent dans Word : on glisse un paragraphe vide entre eux */
+    const sep = doc.createElementNS(W, 'w:p');
+    const tbl = modele.cloneNode(true);
+    parent.insertBefore(sep, apres);
+    parent.insertBefore(tbl, apres);
+    remplirTableau(tbl, { operation: titre,
+      risques: (op.risques || []).filter(x => !estGabarit(x.txt)),
+      mesures: (op.mesures || []).filter(x => !estGabarit(x.txt)) });
+    nOps++; nLibres++;
+  });
+  note(nOps + ' opération(s) de transport analysée(s)' + (nLibres ? ' dont ' + nLibres + ' ajoutée(s) sur le gabarit de la trame' : ''));
 
   /* --- EPI : UNE seule ligne, celle du lieu retenu -------------------------
      Le protocole porte deux lignes (dépôt / chantiers) mais une opération se
@@ -1182,7 +1291,7 @@ function remplirProtocole(doc, d) {
     const tout = p.consignes.filter(c => c.on !== false)
       .map(c => String(c.t || '').trim()).filter(Boolean);
     const n = reecrireListe(doc, ['Accès du site strictement interdit',
-      'Acces du site strictement interdit',
+      'Acces du site strictement interdit', 'Accès du chantier strictement interdit',
       'Suivre les règles de circulation'], tout);
     if (n < 0) note('⚠ règles de sécurité : liste introuvable dans cette trame, ' +
       tout.length + ' règle(s) non reportée(s)');
