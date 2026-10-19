@@ -312,25 +312,154 @@ function appliquerIA() {
   toast('Appliqué : ' + (faits.join(', ') || 'rien') + ' ✓');
 }
 
+/* ===================== V20 — LECTURE DES DOCUMENTS DANS LE NAVIGATEUR =====================
+   Le texte d'un PDF (pdf.js embarqué dans js/lib, jamais de CDN) ou d'un Word est extrait ICI,
+   quelle que soit la taille du fichier : rien n'est envoyé à Google sauf le texte utile. Et comme
+   le palier gratuit de Groq n'accepte que 8 000 jetons par minute, un long document est lu en
+   PASSES de ~12 000 caractères, à une minute d'intervalle, dont les résultats sont fusionnés. */
+let pdfjsPret = null;
+function chargerPdfjs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (pdfjsPret) return pdfjsPret;
+  pdfjsPret = new Promise((ok, ko) => {
+    const sc = document.createElement('script'); sc.src = 'js/lib/pdf.min.js?v=' + encodeURIComponent(typeof APP_VERSION !== 'undefined' ? APP_VERSION : '1');
+    sc.onload = () => { try { window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'js/lib/pdf.worker.min.js'; ok(window.pdfjsLib); } catch (e) { ko(e); } };
+    sc.onerror = () => ko(new Error('pdf.js introuvable (js/lib)')); document.head.appendChild(sc);
+  });
+  return pdfjsPret;
+}
+/** Texte d'un PDF lu dans le navigateur (couche texte) ; '' pour un PDF scanné sans texte. */
+async function textePdfNavigateur(fichier, maxPages, surPage) {
+  const lib = await chargerPdfjs();
+  const pdf = await lib.getDocument({ data: await fichier.arrayBuffer(), isEvalSupported: false }).promise;
+  const n = Math.min(pdf.numPages, maxPages || 150), pages = [];
+  for (let i = 1; i <= n; i++) {
+    const page = await pdf.getPage(i), tc = await page.getTextContent();
+    let y = null, lignes = [], cour = [];
+    tc.items.forEach(it => {
+      const yy = Math.round((it.transform && it.transform[5]) || 0);
+      if (y !== null && Math.abs(yy - y) > 3) { lignes.push(cour.join(' ')); cour = []; }
+      y = yy; if (it.str) cour.push(it.str);
+    });
+    if (cour.length) lignes.push(cour.join(' '));
+    pages.push(lignes.join('\n'));
+    if (surPage) surPage(i, n);
+  }
+  try { pdf.destroy(); } catch (e) {}
+  return pages.join('\n\n').replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+}
+function ligneNormale(l) { return sansAccent(String(l || '')).toLowerCase().replace(/[☒☐|•·\-–]/g, ' ').replace(/\s+/g, ' ').trim(); }
+/** Les lignes de la trame vierge (texte fixe du modèle CDES) : elles n'apprennent rien sur le chantier. */
+let trameLignesCache = null;
+async function lignesDeLaTrame() {
+  if (trameLignesCache) return trameLignesCache;
+  const set = new Set();
+  try {
+    const buf = await chargerTrame('pdp');
+    if (buf) (await texteDuDocx(buf)).split('\n').forEach(l => { const k = ligneNormale(l); if (k.length >= 15) set.add(k); });
+  } catch (e) {}
+  trameLignesCache = set; return set;
+}
+/** Retire du texte lu les lignes qui sont celles de la trame vierge : il ne reste que ce qui est propre au chantier. */
+async function epurerAvecTrame(texte) {
+  const set = await lignesDeLaTrame();
+  if (!set.size) return texte;
+  const out = texte.split('\n').filter(l => { const k = ligneNormale(l); return k.length < 15 || !set.has(k); });
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+/** Découpe un texte en morceaux de ~max caractères, sur des fins de paragraphe. */
+function decouperTexte(texte, max) {
+  const out = []; let cour = '';
+  String(texte || '').split(/\n\n+/).forEach(par => {
+    if ((cour + '\n\n' + par).length > max && cour) { out.push(cour); cour = par; }
+    else cour = cour ? cour + '\n\n' + par : par;
+    while (cour.length > max) { out.push(cour.slice(0, max)); cour = cour.slice(max); }
+  });
+  if (cour) out.push(cour);
+  return out;
+}
+function attendre(ms) { return new Promise(r => setTimeout(r, ms)); }
+/** Les passages d'un long document qui parlent du chantier (page de garde + paragraphes à mots-clés), ≤ max caractères. */
+function passagesUtiles(texte, max) {
+  const mots = /(ma[iî]tre d.ouvrage|ma[iî]trise d.ouvrage|ma[iî]tre d.oeuvre|ma[iî]trise d.oeuvre|moa|moe|adresse|commune|d[ée]partement|code postal|d[ée]lai|dur[ée]e|date|d[ée]marrage|effectif|personnel|nature des travaux|objet|dragage|curage|faucardage|g[ée]nie v[ée]g[ée]tal|terrassement|volume|m3|m³|t[ée]l[ée]phone|t[ée]l\.|chantier|site|lieu|intervention|horaires|planning|phase)/i;
+  const pars = String(texte || '').split(/\n\n+/), tete = pars.slice(0, 6).join('\n\n');
+  let out = tete, n = tete.length;
+  for (let i = 6; i < pars.length && n < max; i++) { if (mots.test(pars[i])) { out += '\n\n' + pars[i]; n += pars[i].length + 2; } }
+  return out.slice(0, max);
+}
+/** Appelle l'IA en plusieurs passes, à ≥ 61 s d'intervalle (palier gratuit : 8 000 jetons/min).
+ *  Sur un 413, attend puis réessaie avec des morceaux plus petits. Rend la liste des extraits. */
+async function appelParPasses(action, charge, texte, box, delai) {
+  let morceaux = decouperTexte(texte, 12000), extraits = [], i = 0, tentatives = 0;
+  const total = () => morceaux.length;
+  while (i < morceaux.length) {
+    if (i > 0) {
+      for (let sec = 61; sec > 0; sec--) {
+        if (box) box.innerHTML = '<div class="avert info">📥 Passe ' + (i + 1) + ' / ' + total() + ' dans ' + sec + ' s… (la clé IA gratuite ne lit que 8 000 mots par minute — le document fait ' + Math.round(texte.length / 1000) + ' k caractères)</div>';
+        await attendre(1000);
+      }
+    }
+    if (box) box.innerHTML = '<div class="avert info">📥 Lecture, passe ' + (i + 1) + ' / ' + total() + '…</div>';
+    try {
+      const j = await appel(action, Object.assign({}, charge, { texte: morceaux[i], partie: i + 1, total: total() }), delai || 240000);
+      if (!j || typeof j.extrait !== 'object' || !j.extrait)
+        throw new Error('Le serveur a répondu, mais sans le contenu attendu : il ne tourne pas sur la dernière version du script. Colle le dernier Code_PDP_V2.gs puis Déployer ▸ Gérer ▸ ✏️ ▸ Nouvelle version.');
+      extraits.push(j); i++; tentatives = 0;
+    } catch (e) {
+      if (/413|429|jetons|tokens per minute|TPM/i.test(e.message || '') && tentatives < 2) {
+        tentatives++;
+        const reste = morceaux.slice(i).join('\n\n');
+        morceaux = morceaux.slice(0, i).concat(decouperTexte(reste, 7000));   // morceaux plus petits
+        for (let sec = 65; sec > 0; sec--) { if (box) box.innerHTML = '<div class="avert info">⏳ Limite de la clé IA atteinte : reprise dans ' + sec + ' s, en morceaux plus petits…</div>'; await attendre(1000); }
+        continue;
+      }
+      throw e;
+    }
+  }
+  return extraits;
+}
+/** Fusion des passes d'une reprise de PDP : premier champ non vide, listes concaténées sans doublon. */
+function fusionnerReprises(liste) {
+  const out = {}; const cle = x => ligneNormale(typeof x === 'string' ? x : JSON.stringify(x));
+  const concat = (a, b) => { const vus = new Set((a || []).map(cle)); return (a || []).concat((b || []).filter(x => { const k = cle(x); if (vus.has(k)) return false; vus.add(k); return true; })); };
+  liste.forEach(j => {
+    const x = j.extrait || {};
+    Object.keys(x).forEach(k => {
+      const v = x[k];
+      if (Array.isArray(v)) out[k] = concat(out[k], v);
+      else if (v && typeof v === 'object') {
+        if (k === 'coactivite') { out[k] = out[k] || { aucune: true, lignes: [] }; out[k].lignes = concat(out[k].lignes, v.lignes); if (v.aucune === false || out[k].lignes.length) out[k].aucune = false; }
+        else { out[k] = out[k] || {}; Object.keys(v).forEach(kk => { if (!out[k][kk] && v[kk]) out[k][kk] = v[kk]; }); }
+      } else if (k === 'confiance') { const ordre = { haute: 3, moyenne: 2, faible: 1 }; if (!out[k] || (ordre[v] || 0) < (ordre[out[k]] || 0)) out[k] = v; }
+      else if (!out[k] && v) out[k] = v;
+    });
+  });
+  return out;
+}
+
 /* --------------------------- mémoire technique ---------------------------- */
 async function lireMemoire(inp) {
   const f = inp.files[0]; inp.value = '';
   if (!f) return;
   const box = document.getElementById('ia-memoire');
-  if (f.size > 8 * 1024 * 1024) {
-    box.innerHTML = '<div class="avert">Fichier trop lourd (' + Math.round(f.size / 1048576) +
-      ' Mo). Envoie seulement les pages utiles, 8 Mo au maximum.</div>';
-    return;
-  }
-  box.innerHTML = '<div class="avert info">📄 Lecture du document… cela peut prendre une minute.</div>';
+  const petit = f.size <= 8 * 1024 * 1024, estDocx = /\.docx$/i.test(f.name);
+  box.innerHTML = '<div class="avert info">📄 Lecture du document dans le navigateur…</div>';
   try {
-    const b64 = await new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(String(r.result).split(',')[1]);
-      r.onerror = () => rej(new Error('Fichier illisible'));
-      r.readAsDataURL(f);
-    });
-    const j = await appel('ia-memoire', { nom: f.name, contenu: b64, catalogues: catalogues() }, 180000);
+    /* V20 : le texte est lu ICI (50 Mo ou plus, aucun problème) ; le fichier ne part à Google
+       (≤ 8 Mo) que pour en tirer photos et logos. Un PDF scanné sans texte ≤ 8 Mo passe par la
+       reconnaissance de caractères côté serveur, comme avant. */
+    let texte = '';
+    try { texte = estDocx ? await texteDuDocx(await f.arrayBuffer()) : await textePdfNavigateur(f, 150, (i, n) => { box.innerHTML = '<div class="avert info">📄 Lecture du document dans le navigateur… page ' + i + ' / ' + n + '</div>'; }); }
+    catch (e) { texte = ''; }
+    const scanne = texte.replace(/\s/g, '').length < 200;
+    if (scanne && !petit) { box.innerHTML = '<div class="avert">Ce PDF est une image scannée sans texte et pèse ' + Math.round(f.size / 1048576) + ' Mo : la reconnaissance de caractères est limitée à 8 Mo. Exporte-le à nouveau depuis Word, ou n’envoie que les pages utiles.</div>'; return; }
+    let b64 = '';
+    if (petit) b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = () => rej(new Error('Fichier illisible')); r.readAsDataURL(f); });
+    box.innerHTML = '<div class="avert info">🤖 ' + (texte.length ? Math.round(texte.length / 1000) + ' k caractères lus — ' : '') + 'l’IA en tire les informations du chantier… (' + (petit ? 'photos et logos compris, ' : '') + 'jusqu’à une minute)</div>';
+    const charge = { nom: f.name, catalogues: catalogues() };
+    if (!scanne) charge.texte = passagesUtiles(texte, 13000);
+    if (petit) charge.contenu = b64;
+    const j = await appel('ia-memoire', charge, 180000);
     /* Un serveur qui répond « ok » sans le contenu attendu est un serveur qui
        tourne encore sur une ancienne version du script : on le dit clairement
        au lieu de planter. */
@@ -508,33 +637,30 @@ async function reprendrePdp(inp) {
   if (!f || !cur) return;
   const box = document.getElementById('ia-reprise');
   if (!box) return;
-  if (f.size > 8 * 1024 * 1024) {
-    box.innerHTML = '<div class="avert">Fichier trop lourd (' + Math.round(f.size / 1048576) + ' Mo), 8 Mo au maximum.</div>';
-    return;
-  }
-  const estDocx = /\.docx$/i.test(f.name);
-  box.innerHTML = '<div class="avert info">📥 Lecture du plan de prévention… une à deux minutes pour un document complet.</div>';
+  const estDocx = /\.docx$/i.test(f.name), petit = f.size <= 8 * 1024 * 1024;
+  box.innerHTML = '<div class="avert info">📥 Lecture du plan de prévention dans le navigateur…</div>';
   try {
-    let charge;
-    if (estDocx) {
-      const texte = await texteDuDocx(await f.arrayBuffer());
-      charge = { nom: f.name, texte: texte };
+    /* V20 : texte lu dans le navigateur (Word ou PDF), débarrassé des lignes de la trame vierge
+       (le texte fixe du modèle n'apprend rien), puis envoyé à l'IA en passes sous la limite de Groq. */
+    let texte = '';
+    try { texte = estDocx ? await texteDuDocx(await f.arrayBuffer()) : await textePdfNavigateur(f, 150, (i, n) => { box.innerHTML = '<div class="avert info">📥 Lecture dans le navigateur… page ' + i + ' / ' + n + '</div>'; }); }
+    catch (e) { texte = ''; }
+    const brut = texte.length;
+    const catal = Object.assign(catalogues(), { frequences: FREQUENCES, roles: ROLES_EXT });
+    let extraits;
+    if (texte.replace(/\s/g, '').length < 200) {
+      if (!petit) throw new Error('Ce PDF est une image scannée sans texte et pèse ' + Math.round(f.size / 1048576) + ' Mo : la reconnaissance de caractères est limitée à 8 Mo.');
+      box.innerHTML = '<div class="avert info">📥 PDF scanné : reconnaissance de caractères côté serveur… une à deux minutes.</div>';
+      const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = () => rej(new Error('Fichier illisible')); r.readAsDataURL(f); });
+      const j = await appel('ia-pdp', { nom: f.name, contenu: b64, catalogues: catal }, 240000);
+      if (!j || typeof j.extrait !== 'object' || !j.extrait) throw new Error('Le serveur a répondu sans le contenu attendu : colle le dernier Code_PDP_V2.gs puis Déployer ▸ Gérer ▸ ✏️ ▸ Nouvelle version.');
+      extraits = [j];
     } else {
-      const b64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(String(r.result).split(',')[1]);
-        r.onerror = () => rej(new Error('Fichier illisible'));
-        r.readAsDataURL(f);
-      });
-      charge = { nom: f.name, contenu: b64 };
+      texte = await epurerAvecTrame(texte);
+      extraits = await appelParPasses('ia-pdp', { nom: f.name, catalogues: catal }, texte, box, 240000);
     }
-    charge.catalogues = Object.assign(catalogues(), { frequences: FREQUENCES, roles: ROLES_EXT });
-    const j = await appel('ia-pdp', charge, 240000);
-    if (!j || typeof j.extrait !== 'object' || !j.extrait)
-      throw new Error('Le serveur a répondu, mais sans le contenu attendu : il ne tourne pas encore sur la '
-        + 'version V2.1 du script. Colle le dernier Code_PDP_V2.gs puis Déployer ▸ Gérer ▸ ✏️ ▸ Nouvelle version.');
-    repriseExtrait = j.extrait;
-    repriseExtrait._meta = { caracteres: j.caracteres || 0, tronque: !!j.tronque, source: j.source || '', nom: f.name };
+    repriseExtrait = fusionnerReprises(extraits);
+    repriseExtrait._meta = { caracteres: brut, tronque: false, source: estDocx ? 'Word' : 'PDF', nom: f.name, passes: extraits.length };
     renderReprise();
   } catch (e) {
     box.innerHTML = '<div class="avert"><b>Lecture impossible :</b><br>' + esc(e.message) + '</div>';
