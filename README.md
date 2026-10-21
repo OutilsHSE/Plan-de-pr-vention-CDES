@@ -1,8 +1,9 @@
 # Plans de prévention — CDES
 
 Page publique de l'outil de rédaction des plans de prévention, PPSPS et protocoles
-de sécurité (GitHub Pages). Version V19 du 16/10/2026 : reprise d'un plan de prévention
-existant (Word ou PDF), tâches et opérations sur mesure, habilitations, protocole mariniers.
+de sécurité (GitHub Pages). Version V21 du 21/10/2026 : reprise d'un plan de prévention lue en
+parallèle sur trois voies (script V2.3), texte allégé avant l'IA. V20 : documents lus dans le navigateur.
+V19 : reprise d'un plan de prévention existant (Word ou PDF), tâches et opérations sur mesure, habilitations, protocole mariniers.
 
 | Fichier | Rôle |
 |---|---|
