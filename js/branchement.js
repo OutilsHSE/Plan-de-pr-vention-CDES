@@ -557,31 +557,109 @@ let memoireExtrait = null;
 function fichierB64(f) {
   return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = () => rej(new Error('Fichier illisible')); r.readAsDataURL(f); });
 }
+/* V22 — photos et logos tirés DANS LE NAVIGATEUR (PDF de toute taille, Word), pendant que l'IA lit
+ * le texte : aucun temps ajouté. Taille affichée dans le document (points) : petit côté ≥ 120 pt
+ * (≈ 4 cm) = photo, sinon logo ; une image répétée sur plusieurs pages (en-tête) = logo, gardée une fois. */
+const IMG_MAX = { photos: 16, logos: 8 };
+function classerImage(lst, wPt, hPt, fab) {
+  const petit = Math.min(wPt, hPt), cle = fab.w + 'x' + fab.h + ':' + fab.b64.length + ':' + fab.b64.slice(-400);   // même image sur plusieurs pages = une fois
+  if (petit < 18 || lst.vus.has(cle) || lst.photos.length + lst.logos.length >= IMG_MAX.photos + IMG_MAX.logos) return;
+  lst.vus.add(cle);
+  const t = petit >= 120 ? 'photos' : 'logos';
+  if (lst[t].length < IMG_MAX[t]) lst[t].push({ fab, logo: t === 'logos' });
+}
+/** Image (bitmap, ImageData ou <img>) → { b64, type, w, h }, réduite à 1 400 px. */
+function imageVersB64(src, w, h, logo) {
+  const k = Math.min(1, 1400 / Math.max(w, h)), c = document.createElement('canvas');
+  c.width = Math.round(w * k); c.height = Math.round(h * k);
+  const g = c.getContext('2d');
+  if (src instanceof ImageData) { const t = document.createElement('canvas'); t.width = w; t.height = h; t.getContext('2d').putImageData(src, 0, 0); src = t; }
+  if (!logo) { g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); }
+  g.drawImage(src, 0, 0, c.width, c.height);
+  const u = c.toDataURL(logo ? 'image/png' : 'image/jpeg', 0.85);
+  return { b64: u.split(',')[1], type: logo ? 'png' : 'jpg', w: c.width, h: c.height };
+}
+async function imagesDuPdf(f) {
+  const lib = await chargerPdfjs(), O = lib.OPS, lst = { photos: [], logos: [], vus: new Set() };
+  const pdf = await lib.getDocument({ data: await f.arrayBuffer(), isEvalSupported: false }).promise;
+  const objet = (page, id) => new Promise(r => { const o = id.startsWith('g_') ? page.commonObjs : page.objs; try { o.get(id, r); } catch (e) { r(null); } setTimeout(() => r(null), 5000); });
+  try {
+    for (let n = 1; n <= Math.min(pdf.numPages, 150); n++) {
+      const page = await pdf.getPage(n), ops = await page.getOperatorList(), pile = [];
+      let m = [1, 0, 0, 1, 0, 0];
+      const vues = [];
+      for (let i = 0; i < ops.fnArray.length; i++) {
+        const fn = ops.fnArray[i], a = ops.argsArray[i];
+        if (fn === O.save) pile.push(m.slice());
+        else if (fn === O.restore) m = pile.pop() || [1, 0, 0, 1, 0, 0];
+        else if (fn === O.transform || (fn === O.paintFormXObjectBegin && a[0])) {
+          const t = fn === O.transform ? a : a[0]; if (fn !== O.transform) pile.push(m.slice());
+          m = [m[0] * t[0] + m[2] * t[1], m[1] * t[0] + m[3] * t[1], m[0] * t[2] + m[2] * t[3], m[1] * t[2] + m[3] * t[3], 0, 0];
+        } else if (fn === O.paintFormXObjectEnd) m = pile.pop() || [1, 0, 0, 1, 0, 0];
+        else if (fn === O.paintImageXObject) vues.push({ id: a[0], w: Math.hypot(m[0], m[1]), h: Math.hypot(m[2], m[3]) });
+      }
+      for (const v of vues) {
+        if (Math.min(v.w, v.h) < 18) continue;
+        const o = await objet(page, v.id);
+        if (!o || !o.width || Math.min(o.width, o.height) < 40) continue;
+        let src = o.bitmap;
+        if (!src && o.data && (o.kind === 2 || o.kind === 3)) {
+          const d = new ImageData(o.width, o.height), px = o.data, pas = o.kind === 3 ? 4 : 3;
+          for (let p = 0, q = 0; p < px.length; p += pas, q += 4) { d.data[q] = px[p]; d.data[q + 1] = px[p + 1]; d.data[q + 2] = px[p + 2]; d.data[q + 3] = pas === 4 ? px[p + 3] : 255; }
+          src = d;
+        }
+        if (!src) continue;
+        const fiche = imageVersB64(src, o.width, o.height, Math.min(v.w, v.h) < 120);   // converti tout de suite : la page sera libérée
+        classerImage(lst, v.w, v.h, fiche);
+      }
+      page.cleanup();
+      if (lst.photos.length >= IMG_MAX.photos) break;   // les logos sont en tête de document
+    }
+  } finally { try { pdf.destroy(); } catch (e) {} }
+  return { images: lst.photos.map(x => x.fab), logos: lst.logos.map(x => x.fab) };
+}
+async function imagesDuDocx(f) {
+  const ent = zipLire(await f.arrayBuffer()), lst = { photos: [], logos: [], vus: new Set() };
+  const lire = async e => e.methode === 0 ? e.donnees : await inflate(e.donnees);
+  const txt = async nom => { const e = ent.find(x => x.nom === nom); return e ? new TextDecoder().decode(await lire(e)) : ''; };
+  const doc = await txt('word/document.xml'), rels = await txt('word/_rels/document.xml.rels'), cible = {};
+  rels.replace(/<Relationship\b[^>]*>/g, r => { const id = (r.match(/Id="([^"]+)"/) || [])[1], t = (r.match(/Target="([^"]+)"/) || [])[1]; if (id && t) cible[id] = 'word/' + t.replace(/^\.?\//, ''); return r; });
+  const re = /<wp:extent cx="(\d+)" cy="(\d+)"[\s\S]*?r:embed="([^"]+)"/g; let k;
+  while ((k = re.exec(doc))) {
+    const e = ent.find(x => x.nom === cible[k[3]]);
+    if (!e || !/\.(png|jpe?g)$/i.test(e.nom)) continue;
+    const wPt = k[1] / 12700, hPt = k[2] / 12700;
+    if (Math.min(wPt, hPt) < 18) continue;
+    const url = URL.createObjectURL(new Blob([await lire(e)], { type: /png$/i.test(e.nom) ? 'image/png' : 'image/jpeg' }));
+    try {
+      const im = await new Promise((ok, ko) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ko; i.src = url; });
+      if (Math.min(im.naturalWidth, im.naturalHeight) >= 40) classerImage(lst, wPt, hPt, imageVersB64(im, im.naturalWidth, im.naturalHeight, Math.min(wPt, hPt) < 120));
+    } catch (er) {} finally { URL.revokeObjectURL(url); }
+  }
+  return { images: lst.photos.map(x => x.fab), logos: lst.logos.map(x => x.fab) };
+}
+
 /** V22 — mémoire technique lu EN ENTIER : tout le texte part en morceaux sur les trois voies
  *  (phasage, risques du site, moyens, horaires, coactivité, EPI, consignes, organismes de prévention) ;
- *  les photos et logos sont tirés en même temps (fichier ≤ 8 Mo). Le résultat s'affiche comme une
+ *  les photos et logos sont tirés dans le navigateur en même temps. Le résultat s'affiche comme une
  *  reprise de PDP : tout en propositions à cocher. */
 async function lireMemoireComplet(f, texte, scanne, petit, box) {
   const catal = Object.assign(catalogues(), { frequences: FREQUENCES, roles: ROLES_EXT });
-  let pImages = Promise.resolve(null);
-  const estPdf = !/\.docx$/i.test(f.name);   // photos et logos : PDF seulement (conversion Google)
-  if (petit && estPdf) {
-    const b64 = await fichierB64(f);
-    pImages = appel('ia-images', { nom: f.name, contenu: b64, ocr: scanne }, 240000).catch(e => ({ ok: false, erreur: String(e && e.message || e) }));
-  }
-  if (scanne) {
+  const estPdf = !/\.docx$/i.test(f.name);
+  let pImages;
+  if (scanne) {   // PDF scanné (≤ 8 Mo) : le serveur fait la reconnaissance de caractères et rend aussi les images
     box.innerHTML = '<div class="avert info">📄 PDF scanné : reconnaissance de caractères côté serveur… une à deux minutes.</div>';
-    const im = await pImages;
+    const im = await appel('ia-images', { nom: f.name, contenu: await fichierB64(f), ocr: true }, 240000).catch(e => ({ ok: false, erreur: String(e && e.message || e) }));
     texte = (im && im.texteOcr) || '';
     if (texte.replace(/\s/g, '').length < 200) throw new Error('Aucun texte lisible dans ce PDF scanné' + (im && im.erreur ? ' (' + im.erreur + ')' : ''));
-  }
+    pImages = Promise.resolve(im);
+  } else pImages = (estPdf ? imagesDuPdf(f) : imagesDuDocx(f)).catch(e => ({ ok: false, erreur: String(e && e.message || e) }));
   const brut = texte.length, utile = allegerTexte(texte);
   const extraits = await appelParPasses('ia-memoire', { nom: f.name, catalogues: catal, complet: true }, utile, box, 240000, 11000);
-  if (petit && estPdf && !scanne) box.innerHTML = '<div class="avert info">📷 Texte lu — récupération des photos et logos…</div>';
   const im = await pImages;
   const x = fusionnerReprises(extraits);
   x._meta = { caracteres: brut, source: 'mémoire technique', nom: f.name, passes: extraits.length, memoire: true,
-    imagesErreur: im && im.ok === false ? im.erreur : '', sansImages: !petit && estPdf };
+    imagesErreur: im && im.ok === false ? im.erreur : '' };
   x._images = ((im && im.images) || []).map((p, i) => ({ ...p, id: 'm' + i, prise: i < 2 }));
   x._logos = ((im && im.logos) || []).map((p, i) => ({ ...p, id: 'l' + i, role: '' }));
   memoireExtrait = null;
@@ -890,7 +968,6 @@ function renderReprise() {
      <div class="photogrid">${x._images.map((im, i) => `<figure class="ph" style="cursor:pointer;outline:${im.prise ? '2.5px solid var(--ok)' : 'none'}"
        onclick="repriseExtrait._images[${i}].prise=!repriseExtrait._images[${i}].prise;renderReprise()">
        <div class="vign"><img src="${img(im)}" alt=""></div><figcaption>${im.prise ? '✓ retenue' : 'ignorée'} · ${im.w}×${im.h}</figcaption></figure>`).join('')}</div>` : ''}
-   ${mem && m.sansImages ? '<p class="hint">Fichier de plus de 8 Mo : le texte a été lu en entier, mais les photos et logos ne sont pas récupérés.</p>' : ''}
    ${mem && m.imagesErreur ? '<p class="hint">Photos et logos non récupérés : ' + esc(m.imagesErreur) + '</p>' : ''}
 
    <div class="row" style="margin-top:12px">
