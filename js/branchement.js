@@ -411,11 +411,11 @@ function allegerTexte(texte) {
       return true;
     }).join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
-async function appelParPasses(action, charge, texte, box, delai) {
+async function appelParPasses(action, charge, texte, box, delai, taille) {
   let voies = 1;
   try { const p = await appel('ping', {}, 20000); voies = Math.max(1, Math.min(3, Number(p && p.voies) || 1)); } catch (e) {}
-  if (voies < 2) return appelParPassesSeq(action, charge, texte, box, delai);
-  const file = decouperTexte(texte, 12000).map((t, i) => ({ t, i }));
+  if (voies < 2) return appelParPassesSeq(action, charge, texte, box, delai, taille);
+  const file = decouperTexte(texte, taille || 12000).map((t, i) => ({ t, i }));
   const etat = { faits: 0, total: file.length, att: {} }, res = [];
   const dessine = () => {
     if (!box) return;
@@ -457,8 +457,8 @@ async function appelParPasses(action, charge, texte, box, delai) {
   return res.sort((a, b) => a.i - b.i).map(x => x.j);
 }
 /** V20 — passes l'une après l'autre (script antérieur à la V2.3). */
-async function appelParPassesSeq(action, charge, texte, box, delai) {
-  let morceaux = decouperTexte(texte, 12000), extraits = [], i = 0, tentatives = 0;
+async function appelParPassesSeq(action, charge, texte, box, delai, taille) {
+  let morceaux = decouperTexte(texte, taille || 12000), extraits = [], i = 0, tentatives = 0;
   const total = () => morceaux.length;
   while (i < morceaux.length) {
     if (i > 0) {
@@ -496,7 +496,8 @@ function fusionnerReprises(liste) {
       const v = x[k];
       if (Array.isArray(v)) out[k] = concat(out[k], v);
       else if (v && typeof v === 'object') {
-        if (k === 'coactivite') { out[k] = out[k] || { aucune: true, lignes: [] }; out[k].lignes = concat(out[k].lignes, v.lignes); if (v.aucune === false || out[k].lignes.length) out[k].aucune = false; }
+        if (k === 'moyens') { out[k] = out[k] || {}; Object.keys(v).forEach(kk => { const a = out[k][kk] || '', b = v[kk] || ''; if (b && ligneNormale(a).indexOf(ligneNormale(b)) < 0) out[k][kk] = (a ? a + ' ' : '') + b; }); }
+        else if (k === 'coactivite') { out[k] = out[k] || { aucune: true, lignes: [] }; out[k].lignes = concat(out[k].lignes, v.lignes); if (v.aucune === false || out[k].lignes.length) out[k].aucune = false; }
         else { out[k] = out[k] || {}; Object.keys(v).forEach(kk => { if (!out[k][kk] && v[kk]) out[k][kk] = v[kk]; }); }
       } else if (k === 'confiance') { const ordre = { haute: 3, moyenne: 2, faible: 1 }; if (!out[k] || (ordre[v] || 0) < (ordre[out[k]] || 0)) out[k] = v; }
       else if (!out[k] && v) out[k] = v;
@@ -521,8 +522,11 @@ async function lireMemoire(inp) {
     catch (e) { texte = ''; }
     const scanne = texte.replace(/\s/g, '').length < 200;
     if (scanne && !petit) { box.innerHTML = '<div class="avert">Ce PDF est une image scannée sans texte et pèse ' + Math.round(f.size / 1048576) + ' Mo : la reconnaissance de caractères est limitée à 8 Mo. Exporte-le à nouveau depuis Word, ou n’envoie que les pages utiles.</div>'; return; }
+    /* V22 : serveur V2.4 → lecture COMPLÈTE sur les trois voies ; sinon, ancien flux (13 000 caractères). */
+    let p = null; try { p = await appel('ping', {}, 20000); } catch (e) {}
+    if (p && p.memoireComplet) { await lireMemoireComplet(f, texte, scanne, petit, box); return; }
     let b64 = '';
-    if (petit) b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = () => rej(new Error('Fichier illisible')); r.readAsDataURL(f); });
+    if (petit) b64 = await fichierB64(f);
     box.innerHTML = '<div class="avert info">🤖 ' + (texte.length ? Math.round(texte.length / 1000) + ' k caractères lus — ' : '') + 'l’IA en tire les informations du chantier… (' + (petit ? 'photos et logos compris, ' : '') + 'jusqu’à une minute)</div>';
     const charge = { nom: f.name, catalogues: catalogues() };
     if (!scanne) charge.texte = passagesUtiles(texte, 13000);
@@ -550,6 +554,41 @@ async function lireMemoire(inp) {
   }
 }
 let memoireExtrait = null;
+function fichierB64(f) {
+  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = () => rej(new Error('Fichier illisible')); r.readAsDataURL(f); });
+}
+/** V22 — mémoire technique lu EN ENTIER : tout le texte part en morceaux sur les trois voies
+ *  (phasage, risques du site, moyens, horaires, coactivité, EPI, consignes, organismes de prévention) ;
+ *  les photos et logos sont tirés en même temps (fichier ≤ 8 Mo). Le résultat s'affiche comme une
+ *  reprise de PDP : tout en propositions à cocher. */
+async function lireMemoireComplet(f, texte, scanne, petit, box) {
+  const catal = Object.assign(catalogues(), { frequences: FREQUENCES, roles: ROLES_EXT });
+  let pImages = Promise.resolve(null);
+  const estPdf = !/\.docx$/i.test(f.name);   // photos et logos : PDF seulement (conversion Google)
+  if (petit && estPdf) {
+    const b64 = await fichierB64(f);
+    pImages = appel('ia-images', { nom: f.name, contenu: b64, ocr: scanne }, 240000).catch(e => ({ ok: false, erreur: String(e && e.message || e) }));
+  }
+  if (scanne) {
+    box.innerHTML = '<div class="avert info">📄 PDF scanné : reconnaissance de caractères côté serveur… une à deux minutes.</div>';
+    const im = await pImages;
+    texte = (im && im.texteOcr) || '';
+    if (texte.replace(/\s/g, '').length < 200) throw new Error('Aucun texte lisible dans ce PDF scanné' + (im && im.erreur ? ' (' + im.erreur + ')' : ''));
+  }
+  const brut = texte.length, utile = allegerTexte(texte);
+  const extraits = await appelParPasses('ia-memoire', { nom: f.name, catalogues: catal, complet: true }, utile, box, 240000, 11000);
+  if (petit && estPdf && !scanne) box.innerHTML = '<div class="avert info">📷 Texte lu — récupération des photos et logos…</div>';
+  const im = await pImages;
+  const x = fusionnerReprises(extraits);
+  x._meta = { caracteres: brut, source: 'mémoire technique', nom: f.name, passes: extraits.length, memoire: true,
+    imagesErreur: im && im.ok === false ? im.erreur : '', sansImages: !petit && estPdf };
+  x._images = ((im && im.images) || []).map((p, i) => ({ ...p, id: 'm' + i, prise: i < 2 }));
+  x._logos = ((im && im.logos) || []).map((p, i) => ({ ...p, id: 'l' + i, role: '' }));
+  memoireExtrait = null;
+  cibleReprise('ia-memoire');
+  repriseExtrait = x;
+  renderReprise();
+}
 const CHAMPS_MEMOIRE = [
   { k: 'titre', l: 'Intitulé du chantier' }, { k: 'lieu', l: 'Lieu de l’intervention' },
   { k: 'departement', l: 'Département' }, { k: 'description', l: 'Description des travaux' },
@@ -611,9 +650,10 @@ function renderMemoire(caracteres) {
      <button class="btn btn-ghost" onclick="memoireExtrait=null;renderMemoire()">Ignorer</button></div>
    </div></div>`;
 }
-function roleLogo(i, role) {
-  if (!memoireExtrait || !memoireExtrait._logos) return;
-  memoireExtrait._logos.forEach((l, k) => {
+function roleLogo(i, role, x) {
+  x = x || memoireExtrait;
+  if (!x || !x._logos) return;
+  x._logos.forEach((l, k) => {
     if (k === i) l.role = (l.role === role ? '' : role);
     else if (role && l.role === role) l.role = '';
   });
@@ -687,6 +727,11 @@ async function reprendrePhotosMemoire(images) {
  * Aucun nom de personne n'est repris : l'annuaire s'en charge.
  * ------------------------------------------------------------------------- */
 let repriseExtrait = null;
+let repriseBoite = 'ia-reprise';   // V22 : la même fiche sert au mémoire technique (boîte « ia-memoire »)
+function cibleReprise(id) {
+  if (repriseBoite !== id) { const ancienne = document.getElementById(repriseBoite); if (ancienne) ancienne.innerHTML = ''; }
+  repriseBoite = id;
+}
 
 /** Texte lisible d'un .docx, lu dans le navigateur : un paragraphe par ligne,
  *  les cellules d'une même ligne de tableau séparées par « | ». */
@@ -731,6 +776,7 @@ async function reprendrePdp(inp) {
       texte = allegerTexte(await epurerAvecTrame(texte));   // V21 : cases non cochées et lignes répétées retirées
       extraits = await appelParPasses('ia-pdp', { nom: f.name, catalogues: catal }, texte, box, 240000);
     }
+    cibleReprise('ia-reprise');
     repriseExtrait = fusionnerReprises(extraits);
     repriseExtrait._meta = { caracteres: brut, tronque: false, source: estDocx ? 'Word' : 'PDF', nom: f.name, passes: extraits.length };
     renderReprise();
@@ -759,8 +805,10 @@ const CHAMPS_REPRISE = [
   { k: 'dateDebut', l: 'Date de début' }, { k: 'dateFin', l: 'Date de fin' }, { k: 'duree', l: 'Durée' },
   { k: 'horaires', l: 'Horaires' }
 ];
+const ORGANISMES_LUS = [{ k: 'inspection', l: 'Inspection du travail' }, { k: 'carsat', l: 'CARSAT / CRAMIF' },
+  { k: 'oppbtp', l: 'OPPBTP' }, { k: 'medecine', l: 'Médecine du travail' }];
 function renderReprise() {
-  const box = document.getElementById('ia-reprise');
+  const box = document.getElementById(repriseBoite);
   if (!box) return;
   if (!repriseExtrait) { box.innerHTML = ''; return; }
   const x = repriseExtrait, m = x._meta || {};
@@ -770,7 +818,10 @@ function renderReprise() {
       ext: (x.entreprisesExt || []).map(() => true), hab: (x.habilitations || []).map(() => true),
       ops: (x.operations || []).map(() => true), imp: (x.importes || []).map(() => true),
       coa: (x.coactivite && x.coactivite.lignes || []).map(() => true),
-      epi: (x.epi || []).slice(), consignes: (x.consignes || []).slice() };
+      epi: (x.epi || []).slice(), consignes: (x.consignes || []).slice(),
+      org: {}, moyens: {} };
+    ORGANISMES_LUS.forEach(o => { if (x.organismes && x.organismes[o.k] && x.organismes[o.k].nom) c.org[o.k] = true; });
+    MOYENS_CHAMPS.forEach(o => { if (x.moyens && x.moyens[o.k]) c.moyens[o.k] = true; });
     CHAMPS_REPRISE.forEach(f => { if (x[f.k]) c.champs[f.k] = true; });
   }
   const c = x._choix;
@@ -782,12 +833,18 @@ function renderReprise() {
   const nbSit = (x.operations || []).reduce((n, o) => n + (o.lignes || []).length, 0);
   const famillesTrouvees = (x.operations || []).filter(o => rapprocher(o.nom, BIBLIO, f => f.famille)).length;
 
-  box.innerHTML = `<div class="bloc exp"><div class="bh"><span class="pic">📥</span>
-     <b>Lu dans le plan de prévention existant<span class="sd">${esc(m.nom || '')} · ${m.source || ''} · ${m.caracteres || 0} caractères · confiance ${esc(conf[1])}</span></b></div>
+  const mem = !!m.memoire, org = x.organismes || {}, moy = x.moyens || {};
+  const img = (b) => `data:image/${b.type === 'png' ? 'png' : 'jpeg'};base64,${b.b64}`;
+  const rien = !CHAMPS_REPRISE.some(f => x[f.k]) && !(x.moa && x.moa.nom) && !(x.moe && x.moe.nom) && !Object.keys(c.org).length
+    && !Object.keys(c.moyens).length && !(x.operations || []).length && !(x.importes || []).length && !(x._images || []).length && !(x._logos || []).length;
+  box.innerHTML = `<div class="bloc ${mem ? 'imp' : 'exp'}"><div class="bh"><span class="pic">${mem ? '📄' : '📥'}</span>
+     <b>${mem ? 'Lu dans le mémoire technique' : 'Lu dans le plan de prévention existant'}<span class="sd">${esc(m.nom || '')} · ${mem ? 'lu en entier' : m.source || ''} · ${m.caracteres || 0} caractères${m.passes > 1 ? ' · ' + m.passes + ' parties' : ''} · confiance ${esc(conf[1])}</span></b></div>
    <div class="bb">
-   <div class="avert ${conf[0]}">Transcription du document, pas une analyse : relis chaque bloc et décoche ce qui ne vaut
-   pas pour ce nouveau chantier. Les noms et téléphones ne sont jamais repris, l’annuaire s’en charge.
+   <div class="avert ${conf[0]}">${mem ? 'Ce que le document dit, rien d’autre : ce qui n’y est pas écrit n’apparaît pas ici. Relis chaque bloc et décoche ce qui est faux.'
+     : 'Transcription du document, pas une analyse : relis chaque bloc et décoche ce qui ne vaut pas pour ce nouveau chantier.'}
+   Les noms et téléphones de personnes ne sont jamais repris, l’annuaire s’en charge.
    ${m.tronque ? '<br><b>Document long : seule la première partie a été lue.</b>' : ''}</div>
+   ${rien ? '<div class="avert">Rien d’exploitable n’a été trouvé dans ce document.</div>' : ''}
 
    <h3>Chantier</h3>
    ${CHAMPS_REPRISE.map(f => x[f.k] ? ck(c.champs[f.k], tog(`repriseExtrait._choix.champs['${f.k}']`),
@@ -796,6 +853,12 @@ function renderReprise() {
    ${x.moe && x.moe.nom ? ck(c.moe, tog('repriseExtrait._choix.moe'), `<span class="muted small">Maître d’œuvre</span><br>${esc([x.moe.nom, x.moe.adresse, x.moe.tel].filter(Boolean).join(' — '))}`) : ''}
    ${Object.values(x.effectifs || {}).some(Boolean) ? ck(c.effectifs, tog('repriseExtrait._choix.effectifs'),
       `<span class="muted small">Effectifs</span><br>${esc(['cdes', 'interim', 'fluvial', 'transport'].filter(k => x.effectifs[k]).map(k => ({ cdes: 'CDES', interim: 'intérim', fluvial: 'fluvial', transport: 'transport' })[k] + ' : ' + x.effectifs[k]).join(' · '))}`) : ''}
+
+   ${Object.keys(c.org).length || ORGANISMES_LUS.some(o => org[o.k] && org[o.k].nom) ? '<h3>Organismes de prévention</h3>' + ORGANISMES_LUS.filter(o => org[o.k] && org[o.k].nom).map(o =>
+      ck(c.org[o.k], tog(`repriseExtrait._choix.org['${o.k}']`), `<span class="muted small">${esc(o.l)}</span><br>${esc([org[o.k].nom, org[o.k].adresse, org[o.k].tel].filter(Boolean).join(' — '))}`)).join('') : ''}
+
+   ${MOYENS_CHAMPS.some(o => moy[o.k]) ? '<h3>Moyens matériels</h3>' + MOYENS_CHAMPS.filter(o => moy[o.k]).map(o =>
+      ck(c.moyens[o.k], tog(`repriseExtrait._choix.moyens['${o.k}']`), `<span class="muted small">${esc(o.l)}</span><br>${esc(moy[o.k])}`)).join('') : ''}
 
    ${(x.entreprisesExt || []).length ? '<h3>Entreprises extérieures</h3>' + x.entreprisesExt.map((e, i) => ck(c.ext[i], tog(`repriseExtrait._choix.ext[${i}]`),
       `<b>${esc(e.nom)}</b> <span class="muted small">${esc(e.role || '')}${e.adresse ? ' — ' + esc(e.adresse) : ''}</span>`)).join('') : ''}
@@ -818,6 +881,17 @@ function renderReprise() {
 
    ${(x.epi || []).length ? '<h3>EPI</h3>' + x.epi.map(e => ck(c.epi.includes(e), `bascListe(repriseExtrait._choix.epi,${JSON.stringify(e).replace(/"/g, '&quot;')})`, esc(e))).join('') : ''}
    ${(x.consignes || []).length ? '<h3>Consignes particulières</h3>' + x.consignes.map(t => ck(c.consignes.includes(t), `bascListe(repriseExtrait._choix.consignes,${JSON.stringify(t).replace(/"/g, '&quot;')})`, esc(t))).join('') : ''}
+
+   ${(x._logos || []).length ? `<h3>Logos</h3><p class="hint">Désigne celui du maître d’ouvrage (MOA) et du maître d’œuvre (MOE) : ils iront en page de garde. La colonne Entreprise garde le logo CDES.</p>
+     <div class="photogrid">${x._logos.map((lo, i) => `<figure class="ph"><div class="vign" style="background:#fff"><img src="${img(lo)}" alt="" style="object-fit:contain"></div>
+       <figcaption>${['moa', 'moe'].map(r => `<button class="btn btn-xs ${lo.role === r ? 'btn-primary' : 'btn-ghost'}" onclick="roleLogo(${i},'${r}',repriseExtrait);renderReprise()">${r.toUpperCase()}</button>`).join('')}
+       <button class="btn btn-xs btn-ghost" onclick="roleLogo(${i},'',repriseExtrait);renderReprise()">—</button></figcaption></figure>`).join('')}</div>` : ''}
+   ${(x._images || []).length ? `<h3>Photos</h3><p class="hint">Celles cochées iront en page de garde.</p>
+     <div class="photogrid">${x._images.map((im, i) => `<figure class="ph" style="cursor:pointer;outline:${im.prise ? '2.5px solid var(--ok)' : 'none'}"
+       onclick="repriseExtrait._images[${i}].prise=!repriseExtrait._images[${i}].prise;renderReprise()">
+       <div class="vign"><img src="${img(im)}" alt=""></div><figcaption>${im.prise ? '✓ retenue' : 'ignorée'} · ${im.w}×${im.h}</figcaption></figure>`).join('')}</div>` : ''}
+   ${mem && m.sansImages ? '<p class="hint">Fichier de plus de 8 Mo : le texte a été lu en entier, mais les photos et logos ne sont pas récupérés.</p>' : ''}
+   ${mem && m.imagesErreur ? '<p class="hint">Photos et logos non récupérés : ' + esc(m.imagesErreur) + '</p>' : ''}
 
    <div class="row" style="margin-top:12px">
      <button class="btn btn-primary grow" onclick="appliquerReprise()">✓ Reprendre ce que j’ai coché</button>
@@ -858,6 +932,14 @@ function appliquerReprise() {
   });
   if (c.moa && x.moa) { cur.moa = { nom: x.moa.nom || '', adresse: x.moa.adresse || '', tel: x.moa.tel || '' }; faits.push('maître d’ouvrage'); }
   if (c.moe && x.moe) { cur.moe = { nom: x.moe.nom || '', adresse: x.moe.adresse || '', tel: x.moe.tel || '' }; faits.push('maître d’œuvre'); }
+  /* V22 — organismes et moyens lus dans le mémoire (après le département, qui recharge le carnet) */
+  let no = 0;
+  ORGANISMES_LUS.forEach(o => { const v = x.organismes && x.organismes[o.k]; if (c.org && c.org[o.k] && v && v.nom) { cur.organismes[o.k] = { nom: v.nom, adresse: v.adresse || '', tel: v.tel || '' }; no++; } });
+  if (no) faits.push(no + ' organisme(s) de prévention');
+  no = 0;
+  if (!cur.moyens) cur.moyens = JSON.parse(JSON.stringify(MOYENS_DEFAUT));
+  MOYENS_CHAMPS.forEach(o => { if (c.moyens && c.moyens[o.k] && x.moyens && x.moyens[o.k]) { cur.moyens[o.k] = x.moyens[o.k]; no++; } });
+  if (no) faits.push(no + ' rubrique(s) de moyens');
   if (c.effectifs && x.effectifs) { ['cdes', 'interim', 'fluvial', 'transport'].forEach(k => { if (x.effectifs[k]) cur.effectifs[k] = x.effectifs[k]; }); faits.push('effectifs'); }
   if (!cur.titreCourt && cur.titre) cur.titreCourt = cur.titre;
 
@@ -880,7 +962,10 @@ function appliquerReprise() {
   (x.operations || []).forEach((o, i) => {
     if (!c.ops[i]) return;
     const fam = rapprocher(o.nom, BIBLIO, f => f.famille);
-    const lignes = (o.lignes || []).map(l => ligneDepuisReprise(l, fam));
+    let lignes = (o.lignes || []).map(l => ligneDepuisReprise(l, fam));
+    /* V22 : une phase du mémoire sans risques décrits → lignes de la bibliothèque, ou une ligne à compléter */
+    if (!lignes.length) lignes = fam ? fam.lignes.map(l => ligneDepuis(l))
+      : [{ danger: 'Situation de travail à préciser', on: true, significatif: false, risques: [{ txt: 'Risque à préciser', on: true }], mesures: [{ txt: 'Mesure à préciser', on: true }] }];
     if (fam) {
       const k = cur.risques.exportes.findIndex(op => op.source === fam.famille && !op.lignes.length);
       const op = { source: fam.famille, nom: o.nom || fam.famille, picto: fam.picto, numeroter: fam.famille !== 'Autres risques', lignes: lignes };
@@ -914,7 +999,14 @@ function appliquerReprise() {
   c.consignes.forEach(t => { if (!cur.consignes.particulieres.some(k => rapprocher(k.t, [t]))) { cur.consignes.particulieres.push({ t: t, on: true }); n++; } });
   if (n) faits.push(n + ' consigne(s)');
 
+  const photos = (x._images || []).filter(im => im.prise), logos = (x._logos || []).filter(l => l.role);
+  if (logos.length) { reprendreLogosMemoire(logos).catch(() => {}); faits.push(logos.length + ' logo(s)'); }
   repriseExtrait = null;
   majDoc(); renderEtapes();
-  toast(faits.length ? 'Repris : ' + faits.join(', ') + ' ✓' : 'Rien de coché', !faits.length);
+  if (photos.length) {
+    reprendrePhotosMemoire(photos)
+      .then(k => { if (k) { majDoc(); renderPhotos(); }
+        toast('Repris : ' + faits.concat(k ? [k + ' photo(s)'] : []).join(', ') + ' ✓'); })
+      .catch(() => toast('Photos : enregistrement impossible sur cet appareil', true));
+  } else toast(faits.length ? 'Repris : ' + faits.join(', ') + ' ✓' : 'Rien de coché', !faits.length);
 }

@@ -1,7 +1,7 @@
 /* ============================================================================
    Plans de prévention CDES — logique de l'application
    ========================================================================= */
-const APP_VERSION='V21', APP_DATE='21 octobre 2026';   // V21 = reprise d’un PDP en 3 voies parallèles (script V2.3), texte allégé (cases non cochées, lignes répétées), attente calculée ; message clair si le script n’est pas à jour pour le mémoire technique ; V20 = lecture des documents dans le navigateur (toute taille), IA en passes sous la limite Groq ; V19 = reprise d'un PDP existant, tâches sur mesure, habilitations
+const APP_VERSION='V22', APP_DATE='21 octobre 2026';   // V22 = mémoire technique lu en entier sur 3 voies (script V2.4) : phasage, risques du site, moyens, horaires, coactivité, EPI, consignes, organismes de prévention, photos et logos ; V21 = reprise d’un PDP en 3 voies parallèles (script V2.3), texte allégé (cases non cochées, lignes répétées), attente calculée ; message clair si le script n’est pas à jour pour le mémoire technique ; V20 = lecture des documents dans le navigateur (toute taille), IA en passes sous la limite Groq ; V19 = reprise d'un PDP existant, tâches sur mesure, habilitations
 const LS='pdp_app_v2';
 
 let state={docs:[],carnet:null,agences:null};
@@ -704,13 +704,14 @@ function blocIA(){
   return `<div class="card"><h2><span class="ico">🤖</span>Assistance IA</h2>
    <p class="small muted">Trois façons de démarrer, cumulables : décris le chantier et l’assistant propose la nature des
    opérations, les activités, les risques importés, les EPI et des consignes ; fais lire le <b>mémoire technique</b>
-   (maître d’ouvrage, lieu, dates, photos, logos) ; ou <b>repars d’un plan de prévention déjà rédigé</b>, Word ou PDF :
+   en entier (chantier, maître d’ouvrage et d’œuvre, phasage, risques du site, moyens, horaires, coactivité, EPI,
+   consignes, organismes de prévention, photos, logos) ; ou <b>repars d’un plan de prévention déjà rédigé</b>, Word ou PDF :
    ses opérations, situations de travail, risques, mesures, EPI et consignes te sont proposés. Tu coches ce que tu gardes.</p>
    <div class="row">
      <button class="btn btn-accent grow" onclick="analyserChantier()">✨ Analyser la description</button>
      <button class="btn btn-ghost grow" onclick="document.getElementById('memoire-file').click()">📄 Lire un mémoire technique</button>
      <button class="btn btn-ghost grow" onclick="document.getElementById('reprise-file').click()">📥 Reprendre un PDP existant</button>
-     <input type="file" id="memoire-file" accept="application/pdf,.pdf" style="display:none" onchange="lireMemoire(this)">
+     <input type="file" id="memoire-file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="display:none" onchange="lireMemoire(this)">
      <input type="file" id="reprise-file" accept=".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="display:none" onchange="reprendrePdp(this)">
    </div>
    <div id="ia-memoire" style="margin-top:10px"></div>
