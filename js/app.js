@@ -1,7 +1,7 @@
 /* ============================================================================
    Plans de prévention CDES — logique de l'application
    ========================================================================= */
-const APP_VERSION='V20', APP_DATE='19 octobre 2026';   // V20 = lecture des documents dans le navigateur (toute taille), IA en passes sous la limite Groq ; V19 = reprise d'un PDP existant, tâches sur mesure, habilitations
+const APP_VERSION='V21', APP_DATE='21 octobre 2026';   // V21 = reprise d’un PDP en 3 voies parallèles (script V2.3), texte allégé (cases non cochées, lignes répétées), attente calculée ; message clair si le script n’est pas à jour pour le mémoire technique ; V20 = lecture des documents dans le navigateur (toute taille), IA en passes sous la limite Groq ; V19 = reprise d'un PDP existant, tâches sur mesure, habilitations
 const LS='pdp_app_v2';
 
 let state={docs:[],carnet:null,agences:null};

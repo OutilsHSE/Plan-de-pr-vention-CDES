@@ -387,9 +387,77 @@ function passagesUtiles(texte, max) {
   for (let i = 6; i < pars.length && n < max; i++) { if (mots.test(pars[i])) { out += '\n\n' + pars[i]; n += pars[i].length + 2; } }
   return out.slice(0, max);
 }
-/** Appelle l'IA en plusieurs passes, à ≥ 61 s d'intervalle (palier gratuit : 8 000 jetons/min).
- *  Sur un 413, attend puis réessaie avec des morceaux plus petits. Rend la liste des extraits. */
+/* ===================== V21 — LECTURE RAPIDE =====================
+   1. Le texte d'un PDP est ALLÉGÉ avant l'IA : cases non cochées (☐), lignes répétées (en-têtes de
+      tableau, pieds de page), numéros de page. Le serveur ne retient de toute façon que ce qui est coché.
+   2. Les passes partent EN PARALLÈLE sur 3 « voies » (le script V2.3 associe un modèle IA à chaque voie,
+      chacun avec son propre quota de 8 000 jetons/min), et chaque voie n'attend que le temps que Groq
+      indique (souvent quelques secondes), au lieu d'une minute fixe. Un script plus ancien : comme avant. */
+const CASES_WINGDINGS = { '\uF0A8': '☐', '\uF06F': '☐', '\uF071': '☐', '\uF0FE': '☒', '\uF078': '☒', '\uF0FD': '☒', '\uF0FB': '☒', '\uF0FC': '☒', '\u2611': '☒', '\u2612': '☒' };
+function allegerTexte(texte) {
+  const vus = new Set();
+  return String(texte || '').replace(/[\uF06F\uF071\uF078\uF0A8\uF0FB-\uF0FE\u2611\u2612]/g, c => CASES_WINGDINGS[c] || c)
+    .split('\n').map(l => {
+      if (l.indexOf('☐') < 0) return l;
+      // cellules de tableau « a | b | c » : on retire celles qui commencent par une case vide ; sinon la ligne entière
+      if (l.indexOf('|') >= 0) return l.split('|').filter(c => !/^\s*☐/.test(c)).join('|').replace(/(\|\s*){2,}/g, '| ');
+      return /^\s*☐/.test(l) ? '' : l.replace(/☐[^☒☐]*/g, '');
+    })
+    .filter(l => {
+      const k = l.replace(/[\s|]+/g, ' ').trim();
+      if (!k || /^(page\s*)?\d+\s*(\/|sur)\s*\d+$/i.test(k)) return false;
+      const n = ligneNormale(k);
+      if (n.length >= 12) { if (vus.has(n)) return false; vus.add(n); }   // ligne déjà vue (en-tête répété, pied de page)
+      return true;
+    }).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
 async function appelParPasses(action, charge, texte, box, delai) {
+  let voies = 1;
+  try { const p = await appel('ping', {}, 20000); voies = Math.max(1, Math.min(3, Number(p && p.voies) || 1)); } catch (e) {}
+  if (voies < 2) return appelParPassesSeq(action, charge, texte, box, delai);
+  const file = decouperTexte(texte, 12000).map((t, i) => ({ t, i }));
+  const etat = { faits: 0, total: file.length, att: {} }, res = [];
+  const dessine = () => {
+    if (!box) return;
+    const at = Object.keys(etat.att).filter(v => etat.att[v] > 0).map(v => 'voie ' + (Number(v) + 1) + ' reprend dans ' + etat.att[v] + ' s').join(' · ');
+    box.innerHTML = '<div class="avert info">📥 Lecture en ' + Math.min(voies, etat.total) + ' voies en parallèle — ' + etat.faits + ' / ' + etat.total + ' partie(s) lue(s)'
+      + (at ? ' · ' + at : '') + ' (' + Math.round(texte.length / 1000) + ' k caractères utiles)</div>';
+  };
+  const patiente = async (v, s) => { for (let k = Math.ceil(s); k > 0; k--) { etat.att[v] = k; dessine(); await attendre(1000); } etat.att[v] = 0; dessine(); };
+  async function voie(v) {
+    while (file.length) {
+      const m = file.shift(); let essais = 0, refait = false;
+      for (;;) {
+        try {
+          const j = await appel(action, Object.assign({}, charge, { texte: m.t, partie: Math.floor(m.i) + 1, total: etat.total, voie: v }), delai || 240000);
+          if (!j || typeof j.extrait !== 'object' || !j.extrait)
+            throw new Error('Le serveur a répondu, mais sans le contenu attendu : il ne tourne pas sur la dernière version du script. Colle le dernier Code_PDP_V2.gs puis Déployer ▸ Gérer ▸ ✏️ ▸ Nouvelle version.');
+          res.push({ i: m.i, j }); etat.faits++; dessine();
+          if (file.length && Number(j.attente) > 0) await patiente(v, Number(j.attente));
+          break;
+        } catch (e) {
+          const msg = String(e && e.message || '');
+          if (/413|429|jetons|tokens per minute|TPM/i.test(msg) && essais < 3) {
+            essais++;
+            if (/413/.test(msg) && m.t.length > 7000) {   // trop long pour une minute : coupé en deux, remis en tête de file
+              const p = decouperTexte(m.t, Math.ceil(m.t.length / 2) + 200);
+              file.unshift(...p.map((t, k) => ({ t, i: m.i + k / (p.length + 1) }))); etat.total += p.length - 1; refait = true;
+            }
+            await patiente(v, (Number((msg.match(/dans (\d+) s/) || [])[1]) || 61) + 1);
+            if (refait) break;
+            continue;
+          }
+          throw e;
+        }
+      }
+    }
+  }
+  dessine();
+  await Promise.all(Array.from({ length: Math.min(voies, file.length) }, (_, v) => voie(v)));
+  return res.sort((a, b) => a.i - b.i).map(x => x.j);
+}
+/** V20 — passes l'une après l'autre (script antérieur à la V2.3). */
+async function appelParPassesSeq(action, charge, texte, box, delai) {
   let morceaux = decouperTexte(texte, 12000), extraits = [], i = 0, tentatives = 0;
   const total = () => morceaux.length;
   while (i < morceaux.length) {
@@ -474,7 +542,11 @@ async function lireMemoire(inp) {
     memoireExtrait._logos = (j.logos || []).map((im, i) => ({ ...im, id: 'l' + i, role: '' }));
     renderMemoire(j.caracteres);
   } catch (e) {
-    box.innerHTML = '<div class="avert"><b>Lecture impossible :</b><br>' + esc(e.message) + '</div>';
+    const m = String(e && e.message || '');
+    box.innerHTML = '<div class="avert"><b>Lecture impossible :</b><br>' + esc(m)
+      + (/Aucun fichier reçu/.test(m) ? '<br><br><b>Cause :</b> le script Google des plans de prévention n’est pas à jour : il attend encore le fichier lui-même, '
+        + 'alors que la page lui envoie le texte déjà lu (le fichier fait plus de 8 Mo, il n’est pas envoyé). Colle le dernier '
+        + '<code>Code_PDP_V2.x.gs</code>, puis Déployer ▸ Gérer les déploiements ▸ ✏️ ▸ <b>Nouvelle version</b>.' : '') + '</div>';
   }
 }
 let memoireExtrait = null;
@@ -656,7 +728,7 @@ async function reprendrePdp(inp) {
       if (!j || typeof j.extrait !== 'object' || !j.extrait) throw new Error('Le serveur a répondu sans le contenu attendu : colle le dernier Code_PDP_V2.gs puis Déployer ▸ Gérer ▸ ✏️ ▸ Nouvelle version.');
       extraits = [j];
     } else {
-      texte = await epurerAvecTrame(texte);
+      texte = allegerTexte(await epurerAvecTrame(texte));   // V21 : cases non cochées et lignes répétées retirées
       extraits = await appelParPasses('ia-pdp', { nom: f.name, catalogues: catal }, texte, box, 240000);
     }
     repriseExtrait = fusionnerReprises(extraits);
